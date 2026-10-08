@@ -20,7 +20,8 @@ image plus this repo's [tuning overlay](overlay/).
 3. Connect the PocketCHIP's micro-USB port to the computer; press the power button if it
    stays off.
 4. Run `./install.sh` in this repo. To have it join Wi-Fi on first boot, run
-   `./install.sh --wifi "MyNetwork"` (it prompts for the password).
+   `./install.sh --wifi "MyNetwork"` (it prompts for the password). The Wi-Fi is
+   2.4 GHz only, WPA2-Personal or open; WPA3-only networks are not supported.
 5. When it prints `Done`: remove the jumper, unplug USB, hold the power button for
    8 seconds, then press it. Log in as `chip`, password `chip` (sudo); change the
    password with `passwd`.
