@@ -67,6 +67,7 @@ shellcheck install.sh tools/*.sh scripts/*.sh
 pytest -n auto --cov
 ```
 
+- `tools/device-check.sh [user@]HOST`: read-only health report of a booted PocketCHIP over ssh (`SSHPASS` with sshpass for password login).
 - `scripts/fetch-sources.sh`: clone the upstream repos into `cache/src/`.
 - `scripts/install-nand-image-builder.sh DEST`: build sunxi-tools' `sunxi-nand-image-builder`.
 - `overlay/`: rootfs tuning applied before `mkfs.ubifs`.
