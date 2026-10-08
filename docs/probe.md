@@ -70,8 +70,8 @@ extracts it for use outside the container (`--uboot`).
    script (`pocketrechip probe-script` prints it), uploads the window as `DIR/dram.bin`,
    resets the board and prints the analysis. `pocketrechip analyze DIR/dram.bin` re-decodes it.
    Exit status is non-zero if the script did not finish.
-3. From a workstation: `tools/fel-probe/remote.sh HOST probe probe` builds the image on
-   `HOST` from this repo and writes to the untracked `cache/probe/`. `HOST` must see the
+3. From a workstation: `tools/run.sh --host HOST probe --out /cache/probe` builds the image
+   on `HOST` from this repo and writes to the untracked `cache/probe/`. `HOST` must see the
    repo at the same path (shared filesystem); the container runs as the invoking user
    with the host's `plugdev` group.
 

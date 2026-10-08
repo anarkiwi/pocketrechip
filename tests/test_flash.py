@@ -2,21 +2,18 @@
 
 # pylint: disable=missing-function-docstring
 
-import hashlib
 import json
 import shutil
 
 import pytest
 from fakedev import FakeDevice, FakeNand
-from flashkit import BOOT_SCR, HYNIX, SPL_LEN, TOSHIBA, prepared
+from flashkit import BOOT_SCR, HYNIX, SPL_LEN, TOSHIBA, prepared, release_env
 
 from pocketrechip import backup as B
 from pocketrechip import fel_agent
 from pocketrechip import flash as F
 from pocketrechip import images as I
-from pocketrechip import overlay as O
 from pocketrechip import probe_layout as L
-from pocketrechip import release as R
 from pocketrechip import steps as S
 from pocketrechip.cli import main
 
@@ -323,33 +320,7 @@ def test_dry_run_writes_plans(tmp_path, monkeypatch):
 
 
 def cli_env(tmp_path, monkeypatch, dev):
-    """Release assets served from file:// and a prebuilt UBIFS in the cache."""
-    prep = prepared(tmp_path / "rel")
-    src = tmp_path / "srv"
-    assets = {}
-    for asset, data in (
-        (R.SPL, prep.spl.read_bytes()),
-        (R.UBOOT_DTB, (tmp_path / "rel" / "uboot").read_bytes()),
-        (R.UBOOT_FEL, prep.uboot_fel.read_bytes()),
-    ):
-        path = src / asset.repo / asset.tag / asset.name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        assets[asset.name] = R.Asset(
-            asset.repo, asset.tag, asset.name, hashlib.sha256(data).hexdigest()
-        )
-    monkeypatch.setattr(R, "URL", f"file://{src}/{{repo}}/{{tag}}/{{name}}")
-    for attr in ("SPL", "UBOOT_DTB", "UBOOT_FEL"):
-        monkeypatch.setattr(R, attr, assets[getattr(R, attr).name])
-    cache = tmp_path / "cache"
-    tar_sha = R.ROOTFS["pocketchip"].sha256
-    base = cache / "ubifs" / I.ubifs_key(tar_sha, O.default())[:16]
-    base.parent.mkdir(parents=True)
-    shutil.copyfile(prep.ubifs.image, base.with_suffix(".ubifs"))
-    shutil.copyfile(prep.ubifs.boot_scr, base.with_suffix(".boot.scr"))
-    base.with_suffix(".json").write_text("{}")
-    dev.ubi.register(prep.ubifs.image.read_bytes(), {"/boot/boot.scr": BOOT_SCR})
-    monkeypatch.setattr(fel_agent, "subprocess_runner", dev)
+    cache = release_env(tmp_path, monkeypatch, dev)
     return [
         "flash",
         "--out",

@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +50,8 @@ ROOTFS_OFF = 0x1000000
 UBI_RESERVED_PEBS = 2 + 1 + 1
 BEB_LIMIT_PER_1024 = 20
 BOOT_SCR = "boot/boot.scr"
+
+Layer = Callable[[Path], object]
 
 
 def snib(src: Path, dst: Path, oob: int, runner: Runner | None = None) -> bytes:
@@ -149,8 +151,10 @@ def extract(tar: Path, root: Path) -> None:
 
 
 @contextmanager
-def rootfs_tree(tar: Path, overlay: Path | None, purpose: str) -> Iterator[Path]:
-    """Temporary root of tar with overlay applied, removed on exit (needs root)."""
+def rootfs_tree(
+    tar: Path, overlay: Path | None, purpose: str, layer: Layer | None = None
+) -> Iterator[Path]:
+    """Temporary root of tar with overlay then layer applied, removed on exit (root)."""
     if os.geteuid():
         raise PermissionError(
             f"{purpose} needs root to keep file ownership: "
@@ -162,6 +166,8 @@ def rootfs_tree(tar: Path, overlay: Path | None, purpose: str) -> Iterator[Path]
         extract(tar, root)
         if overlay:
             O.apply(overlay, root)
+        if layer:
+            layer(root)
         yield root
 
 
@@ -174,6 +180,41 @@ def cached_ubifs(tar_sha256: str, overlay: Path | None, cache: Path) -> Ubifs | 
     base = _ubifs_base(tar_sha256, overlay, cache)
     out = Ubifs(base.with_suffix(".ubifs"), base.with_suffix(".boot.scr"))
     return out if base.with_suffix(".json").exists() else None
+
+
+def _mkfs(
+    tar: Path,
+    overlay: Path | None,
+    layer: Layer | None,
+    out: Ubifs,
+    runner: Runner | None,
+) -> Ubifs:
+    """mkfs.ubifs of tar with overlay and layer applied into out."""
+    with rootfs_tree(tar, overlay, "building the UBIFS image", layer) as root:
+        scr = root / BOOT_SCR
+        if scr.is_symlink() or not scr.is_file():
+            raise FileNotFoundError(f"{tar} has no regular /{BOOT_SCR}")
+        part = out.image.with_name(out.image.name + ".part")
+        t0 = time.monotonic()
+        log.info("mkfs.ubifs %s", " ".join(MKFS_ARGS))
+        (runner or fel_agent.subprocess_runner)(
+            ["mkfs.ubifs", *MKFS_ARGS, "-d", str(root), "-o", str(part)]
+        )
+        log.info("UBIFS %d bytes in %.0f s", part.stat().st_size, time.monotonic() - t0)
+        shutil.copyfile(scr, out.boot_scr)
+        os.replace(part, out.image)
+    return out
+
+
+@contextmanager
+def private_ubifs(
+    tar: Path, overlay: Path | None, layer: Layer, runner: Runner | None = None
+) -> Iterator[Ubifs]:
+    """UBIFS image with a secret-bearing layer in a 0700 temporary dir, deleted on exit."""
+    with tempfile.TemporaryDirectory(prefix="pocketrechip-private-") as tmp:
+        base = Path(tmp) / "rootfs"
+        out = Ubifs(base.with_suffix(".ubifs"), base.with_suffix(".boot.scr"))
+        yield _mkfs(tar, overlay, layer, out, runner)
 
 
 def build_ubifs(
@@ -190,19 +231,7 @@ def build_ubifs(
     meta = base.with_suffix(".json")
     out = Ubifs(base.with_suffix(".ubifs"), base.with_suffix(".boot.scr"))
     base.parent.mkdir(parents=True, exist_ok=True)
-    with rootfs_tree(tar, overlay, "building the UBIFS image") as root:
-        img = root.parent / "rootfs.ubifs"
-        scr = root / BOOT_SCR
-        if scr.is_symlink() or not scr.is_file():
-            raise FileNotFoundError(f"{tar} has no regular /{BOOT_SCR}")
-        t0 = time.monotonic()
-        log.info("mkfs.ubifs %s", " ".join(MKFS_ARGS))
-        (runner or fel_agent.subprocess_runner)(
-            ["mkfs.ubifs", *MKFS_ARGS, "-d", str(root), "-o", str(img)]
-        )
-        log.info("UBIFS %d bytes in %.0f s", img.stat().st_size, time.monotonic() - t0)
-        shutil.copyfile(scr, out.boot_scr)
-        shutil.copyfile(img, out.image)
+    _mkfs(tar, overlay, None, out, runner)
     meta.write_text(
         json.dumps(
             {

@@ -20,6 +20,7 @@ DRAM_LO, DRAM_HI = 0x43000000, 0x58000000
 MTDPARTS_RE = re.compile(r"nand0:(0x[0-9a-f]+)@(0x[0-9a-f]+)\(blk\)")
 VAR_RE = re.compile(r"\$\{(\w+)\}")
 BOOT0_USABLE = 1024
+SID = "02c00081:4c4d4e4f:50515253:54555657"
 
 
 class Reset(Exception):
@@ -174,7 +175,7 @@ class FakeDevice:
         fail=None,
         inject=None,
     ):
-        self.nand, self.stale, self.fail = nand, stale, fail
+        self.nand, self.stale, self.fail, self.sid = nand, stale, fail, SID
         self.inject = inject or (lambda words: False)
         self.booted: list[str] = []
         self.ubi = UbiModel()
@@ -222,6 +223,9 @@ class FakeDevice:
             if self.state != "fel":
                 raise subprocess.CalledProcessError(1, ["sunxi-fel", "ver"])
             return "AWUSBFEX soc=00001625(A13)\n"
+        if args == ["sid"]:
+            assert self.state == "fel"
+            return f"{self.sid}\n"
         assert self.state == "fel" and args[:2] == ["-p", "uboot"]
         self.booted.append(args[2])
         assert args[3:5] == ["write", hex(L.SCRIPT_ADDR)]

@@ -4,21 +4,76 @@
 `os-2026.09.23-010738`, flavors `headless`, `gui`, `pocketchip`) with the `x-chip-uboot`
 release `uboot-2026.09.13-122745` over FEL, streaming the root filesystem through the
 DFU agent loop of [probe.md](probe.md), so image size is bounded by the UBI volume, not DRAM.
-`pocketrechip restore` writes a `pocketrechip backup` back.
+`pocketrechip restore` writes a `pocketrechip backup` back. `pocketrechip install` runs
+backup and flash for one board in one command.
 
 ## Usage
 
 ```sh
-pocketrechip backup --out cache/backup                       # first, on the old system
+pocketrechip install [--flavor pocketchip] [--no-backup] [--verify-backup] [--wifi SSID]
+pocketrechip restore [--backup DIR] [--verify]           # default: the board's install backup
+pocketrechip backup --out cache/backup                   # the steps of install, by hand
 pocketrechip flash --out DIR --backup cache/backup [--flavor pocketchip] [--dry-run]
-pocketrechip restore --out DIR --backup cache/backup [--verify]
-tools/fel-probe/remote.sh HOST flash flash --backup /cache/backup   # via an ssh host
+tools/run.sh [--host HOST] flash --out /cache/flash --backup /cache/backup   # in Docker
 ```
 
-Options: `--cache DIR` (downloads and images, default `$POCKETRECHIP_CACHE` or `cache`),
-`--chunk-mib N` (rootfs chunk, default 64), `--overlay DIR` / `--no-overlay`,
+Options: `--cache DIR` (downloads, images, per-board state; default `$POCKETRECHIP_CACHE`
+or `cache`), `--chunk-mib N` (rootfs chunk, default 64), `--overlay DIR` / `--no-overlay`,
 `--no-backup` (flash without a backup), `--chip toshiba|hynix` (dry-run plan),
-`--uboot` (probe U-Boot), `--timeout` (seconds per DFU session).
+`--uboot` (probe U-Boot), `--timeout` (seconds per DFU session), `--prepare-only` (fetch
+and build the image only), `--wifi SSID`, `--wifi-open`, `--wifi-password-file FILE`.
+
+## install
+
+1. Image: fetch the release and build (or reuse) the UBIFS image.
+2. Connect: wait for a board in FEL and read its SoC SID (`sunxi-fel sid`); its state is
+   `cache/devices/<sid>/` (`backup/`, `flash/`), so boards never share a backup.
+3. Backup: `pocketrechip backup` into `backup/`, resumed if incomplete, skipped if
+   complete (`--verify-backup` re-reads each chunk). `--no-backup` skips it.
+4. Flash: wait for FEL, then `pocketrechip flash` with that backup.
+
+It prints a summary with the phase durations, the backup path, the login (`chip`/`chip`,
+in `sudo`, from x-chip-os `0200-user.hook.chroot`) and what to do physically.
+`pocketrechip restore` without `--backup` waits for a board the same way and restores
+`cache/devices/<sid>/backup/`.
+
+`install.sh` and `tools/run.sh` run these in the Docker image with the repo's `cache/` at
+`/cache`, locally or on an ssh host (`--host`) that sees the repo at the same path. The
+UBIFS build needs root: `install` and `flash` first run `--prepare-only` as root, then the
+USB steps as the invoking user with the host's `plugdev` group, which the udev rule
+`tools/70-pocketrechip.rules` gives access to `1f3a:efe8` (FEL) and `1f3a:1010` (agent
+DFU). With `--wifi` the whole command runs as root (see below). Root-owned files in
+`cache/` are handed back to the user afterwards.
+
+## Wi-Fi profile
+
+`--wifi SSID` (install, flash, qemu-smoke) adds a NetworkManager keyfile
+`/etc/NetworkManager/system-connections/<SSID, [^A-Za-z0-9_-] as _>.nmconnection`,
+`root:root` mode 0600 (NetworkManager ignores keyfiles readable by others), after the
+overlay and before `mkfs.ubifs`:
+
+- `[connection]` `id` (the SSID, GKeyFile-escaped), `uuid` (uuid5 of the SSID),
+  `type=wifi`, `autoconnect=true`; `[wifi]` `mode=infrastructure`, `ssid`; `[ipv4]` and
+  `[ipv6]` `method=auto`.
+- `ssid=` is the plain string for printable ASCII without `;`, `\` or edge spaces, else
+  the `b;b;...;` byte list (libnm-core `nm-keyfile.c` `ssid_writer`/`get_bytes`).
+  `nmcli --offline connection modify` reads both forms back (`tests/test_wifi.py`).
+- `[wifi-security]` `key-mgmt=wpa-psk`, `psk=` the 64-hex PSK
+  `PBKDF2-HMAC-SHA1(password, SSID, 4096, 32)` as `wpa_passphrase` derives it; the
+  password itself is not stored. `--wifi-open` omits the section.
+
+The password comes from `--wifi-password-file FILE`, else `$POCKETRECHIP_WIFI_PASSWORD`,
+else a no-echo prompt (asked twice); never from the command line. It must be 8-63
+printable ASCII characters or 64 hex digits. The image holding the PSK is built in a
+private 0700 temporary directory outside `cache/` and deleted after the flash, also on
+failure; the overlay-only image stays cached. `--dry-run` prints only a redacted line.
+`tools/run.sh` mounts a password file read-only and passes the variable through; because
+the private image must be built and flashed by the same process, a `--wifi` run is one
+root container.
+
+The pocketchip flavour runs `openssh-server` (x-chip-os `headless.list.chroot`), so the
+board is reachable as `ssh chip@<address>`; x-chip-os purges `avahi-daemon`, so the
+address comes from the router or `ip a` on the device.
 
 ## What you do physically
 
@@ -37,7 +92,7 @@ Options: `--cache DIR` (downloads and images, default `$POCKETRECHIP_CACHE` or `
   eraseblock (SLC mode) minus two pages for the UBI headers. The image and its
   `/boot/boot.scr` are cached in `cache/ubifs/` keyed by the tar sha256, the overlay digest
   and the mkfs parameters. Building needs root: run it in the Docker image as root
-  (`remote.sh` does a root `--dry-run` first, then the device step as the user).
+  (`tools/run.sh` runs `--prepare-only` as root first, then the device step as the user).
 - The BROM SPL eraseblock is built for the detected chip only, as x-chip-tools
   `lib-nand.sh` does: `sunxi-nand-image-builder -c 64/1024 -p 16384 -o <oob> -u 1024
   -e 4194304 -b -s` of `sunxi-spl.bin`, then four copies at pages 0/64/128/192, each
@@ -118,11 +173,12 @@ in the image. `--no-overlay` builds the stock rootfs.
 ## QEMU smoke test
 
 ```sh
-docker run --rm -v "$PWD/cache:/cache" pocketrechip pocketrechip qemu-smoke --cache /cache [--no-overlay]
+tools/run.sh qemu-smoke [--no-overlay] [--wifi SSID]
 ```
 
-Options: `--flavor`, `--overlay DIR` / `--no-overlay`, `--timeout` (seconds until QEMU
-is killed, default 3600). It needs root, like the UBIFS build.
+Options: `--flavor`, `--overlay DIR` / `--no-overlay`, `--wifi SSID` (with the Wi-Fi
+options above), `--timeout` (seconds until QEMU is killed, default 3600). It needs root,
+like the UBIFS build.
 
 `qemu-smoke` builds the tree `flash` gives `mkfs.ubifs` (`images.rootfs_tree`: the
 extracted tar with the overlay applied) and boots it with its own `/vmlinuz` and
@@ -158,6 +214,10 @@ extracted tar with the overlay applied) and boots it with its own `/vmlinuz` and
 | `systemctl is-enabled plocate-updatedb.timer` | `masked` | not `masked` |
 | `systemctl is-active zram-swap.service` | `active` | not `active` |
 | `sysctl -n vm.page-cluster` | `0` | not `0` |
+| `stat` of the `--wifi` keyfile | `600 root` | same |
+| `nmcli -t -f NAME connection show` | lists the `--wifi` SSID | same |
+
+The Wi-Fi rows apply with `--wifi`; QEMU has no radio, so the profile is loaded, never connected.
 | failing units: `ActiveState=failed`, `Result` not `success`, or `NRestarts` > 0 | only expected ones | only expected ones |
 
 Expected failures (`qemu_smoke.EXPECTED_FAILURES`): `ubihealthd.service` runs

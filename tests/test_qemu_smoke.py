@@ -3,6 +3,7 @@
 # pylint: disable=missing-function-docstring
 
 import dataclasses
+import hashlib
 import io
 import json
 import os
@@ -15,6 +16,8 @@ import pytest
 from pocketrechip import cli
 from pocketrechip import overlay as O
 from pocketrechip import qemu_smoke as Q
+from pocketrechip import release as R
+from pocketrechip import wifi as W
 
 MEM_KIB, PAGE = 494788, 4096
 OVERLAY = {
@@ -352,21 +355,30 @@ def fake_vm_fixture(tmp_path, monkeypatch):
         root = kernel.parents[1]
         assert initrd == root / "boot/initrd.img-6" and sock.parent == root.parent
         fstab = f'sed "s/^/{Q.MARK} fstab /" "{root}/etc/fstab"'
-        return ["sh", "-c", f'cat "{console}"; {fstab}']
+        keys = (
+            f'for f in "{root}"/{W.DIR}/*{W.SUFFIX}; do [ -f "$f" ] && '
+            f'echo "{Q.MARK} nm_keyfiles $(stat -c %a "$f") root /{W.DIR}/${{f##*/}}"; '
+            "done"
+        )
+        return ["sh", "-c", f'{keys}; cat "{console}"; {fstab}']
 
     monkeypatch.setattr(Q, "qemu_argv", qemu)
     monkeypatch.setattr(Q, "virtiofsd_argv", lambda root, sock: daemon(sock))
-    return release_tar(tmp_path / "r.tar.gz"), console
+    tar = release_tar(tmp_path / "r.tar.gz")
+    asset = R.Asset("os", "t", tar.name, hashlib.sha256(tar.read_bytes()).hexdigest())
+    asset.path(tmp_path / "c").parent.mkdir(parents=True)
+    tar.rename(asset.path(tmp_path / "c"))
+    return asset, console
 
 
 @pytest.mark.parametrize("overlay,sections", [(True, OVERLAY), (False, BASELINE)])
 def test_smoke_end_to_end(tmp_path, fake_vm, overlay, sections):
-    tar, console = fake_vm
+    asset, console = fake_vm
     console.write_text(serial(sections))
     lay = O.SEARCH[0] if overlay else None
-    out = Q.smoke(tar, "ab" * 32, lay, tmp_path / "c", 10)
+    out = Q.smoke(asset, lay, tmp_path / "c", 10)
     assert out.ok, out.text()
-    assert out.logs == tmp_path / "c/qemu-smoke" / Q.smoke_key("ab" * 32, lay)
+    assert out.logs == tmp_path / "c/qemu-smoke" / Q.smoke_key(asset.sha256, lay)
     fstab = Q.parse((out.logs / "serial.log").read_text())["fstab"]
     assert fstab == (
         ["rootfs / virtiofs noatime 0 0"]
@@ -380,9 +392,9 @@ def test_smoke_end_to_end(tmp_path, fake_vm, overlay, sections):
 
 
 def test_smoke_reports_unfinished_boot(tmp_path, fake_vm):
-    tar, console = fake_vm
+    asset, console = fake_vm
     console.write_text(serial(OVERLAY, end=False))
-    out = Q.smoke(tar, "ab" * 32, O.SEARCH[0], tmp_path / "c", 10)
+    out = Q.smoke(asset, O.SEARCH[0], tmp_path / "c", 10)
     assert not out.ok and out.checks == [] and "no end marker" in out.text()
     assert json.loads((out.logs / "result.json").read_text())["result"] is None
 
@@ -396,8 +408,10 @@ def test_smoke_key_tracks_overlay():
 def test_cli(tmp_path, monkeypatch, capsys, ok, flags):
     seen = {}
 
-    def smoke(tar, sha, overlay, cache, timeout):
-        seen.update(tar=tar, sha=sha, overlay=overlay, cache=cache, timeout=timeout)
+    def smoke(asset, overlay, cache, timeout, wifi):
+        seen.update(
+            asset=asset, overlay=overlay, cache=cache, timeout=timeout, wifi=wifi
+        )
         out = Q.Outcome(tmp_path, overlay is not None)
         out.error = "boom"
         if ok:
@@ -405,18 +419,29 @@ def test_cli(tmp_path, monkeypatch, capsys, ok, flags):
             out.checks = Q.evaluate(out.result, True)
         return out
 
-    monkeypatch.setattr(
-        cli.release, "fetch", lambda asset, cache: tmp_path / asset.name
-    )
     monkeypatch.setattr(cli.qemu_smoke, "smoke", smoke)
     argv = ["qemu-smoke", "--cache", str(tmp_path), "--timeout", "5", *flags]
     assert cli.main(argv) == (0 if ok else 1)
-    asset = cli.release.ROOTFS["pocketchip"]
     assert seen == {
-        "tar": tmp_path / asset.name,
-        "sha": asset.sha256,
+        "asset": R.ROOTFS["pocketchip"],
+        "wifi": None,
         "overlay": None if flags else O.default(),
         "cache": tmp_path,
         "timeout": 5.0,
     }
     assert ("PASS" if ok else "FAIL  boom") in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("listed", [True, False])
+def test_smoke_wifi_checks(tmp_path, fake_vm, monkeypatch, listed):
+    monkeypatch.setattr(os, "chown", lambda *a, **kw: None)
+    asset, console = fake_vm
+    names = ["lo", "Home\\:Net"] if listed else ["lo"]
+    console.write_text(serial(OVERLAY | {"nm_connections": names}))
+    prof = W.Profile("Home:Net", W.psk("password", "Home:Net"))
+    out = Q.smoke(asset, O.SEARCH[0], tmp_path / "c", 10, prof)
+    assert out.ok == listed, out.text()
+    assert out.result.nm_keyfiles == (f"600 root /{W.DIR}/Home_Net.nmconnection",)
+    assert out.logs.name == Q.smoke_key(asset.sha256, O.SEARCH[0], prof.uuid)
+    assert [c.ok for c in out.checks[-2:]] == [True, listed]
+    assert prof.psk not in (out.logs / "serial.log").read_text()

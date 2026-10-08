@@ -17,6 +17,8 @@ from pathlib import Path
 
 from . import images as I
 from . import overlay as O
+from . import release as R
+from . import wifi as W
 from .progress import progress_bar
 
 log = logging.getLogger(__name__)
@@ -44,6 +46,8 @@ PROBES = {
     "page_size": "getconf PAGESIZE",
     "units": "systemctl show -p Id,ActiveState,Result,NRestarts '*'"
     ' | awk \'BEGIN { RS = ""; FS = "\\n" } { $1 = $1; print }\'',
+    "nm_keyfiles": f"stat -c '%a %U %n' /{W.DIR}/*{W.SUFFIX}",
+    "nm_connections": "nmcli -t -f NAME connection show",
     "analyze": "systemd-analyze",
     "free": "free -k",
 }
@@ -181,6 +185,8 @@ class Result:
     mem_total_kib: int
     failing: tuple[str, ...]
     analyze: str
+    nm_keyfiles: tuple[str, ...] = ()
+    nm_connections: tuple[str, ...] = ()
 
     @classmethod
     def from_log(cls, text: str) -> "Result":
@@ -210,6 +216,10 @@ class Result:
             mem_total_kib=int(mem[0][1]),
             failing=failing(s.get("units", [])),
             analyze="\n".join(s.get("analyze", [])),
+            nm_keyfiles=tuple(l.strip() for l in s.get("nm_keyfiles", [])),
+            nm_connections=tuple(
+                re.sub(r"\\(.)", r"\1", l.strip()) for l in s.get("nm_connections", [])
+            ),
         )
 
 
@@ -236,6 +246,25 @@ def _is_zram_swap(swaps: tuple[tuple[str, str, int], ...], size: int) -> bool:
         and re.fullmatch(r"/dev/zram\d+", swaps[0][0]) is not None
         and swaps[0][1:] == ("partition", size)
     )
+
+
+def wifi_checks(r: Result, wifi: W.Profile) -> list[Check]:
+    """The profile's keyfile is root's with mode 600 and NetworkManager lists it."""
+    keyfile = f"600 root /{W.DIR / wifi.filename}"
+    return [
+        Check(
+            "wifi keyfile",
+            keyfile,
+            "; ".join(r.nm_keyfiles) or "none",
+            keyfile in r.nm_keyfiles,
+        ),
+        Check(
+            "wifi connection",
+            f"{wifi.ssid} listed by nmcli",
+            ", ".join(r.nm_connections) or "none",
+            wifi.ssid in r.nm_connections,
+        ),
+    ]
 
 
 def evaluate(r: Result, overlay: bool) -> list[Check]:
@@ -295,9 +324,9 @@ def report(r: Result, checks: list[Check]) -> str:
     return "\n".join([*lines, f"system state: {r.state}", r.analyze]) + "\n"
 
 
-def smoke_key(tar_sha256: str, overlay: Path | None) -> str:
-    """Log directory key over the tar, the overlay, the test unit and script."""
-    text = f"{tar_sha256} {O.digest(overlay)} {unit_file()} {script()} {APPEND}"
+def smoke_key(tar_sha256: str, overlay: Path | None, wifi: str = "") -> str:
+    """Log directory key over the tar, the overlay, the Wi-Fi profile id, unit, script."""
+    text = f"{tar_sha256} {O.digest(overlay)} {wifi} {unit_file()} {script()} {APPEND}"
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
@@ -388,13 +417,20 @@ class Outcome:
 
 
 def smoke(
-    tar: Path, tar_sha256: str, overlay: Path | None, cache: Path, timeout: float
+    asset: R.Asset,
+    overlay: Path | None,
+    cache: Path,
+    timeout: float,
+    wifi: W.Profile | None = None,
 ) -> Outcome:
-    """Build the flash tree of tar with overlay, boot it under QEMU and evaluate it."""
-    logs = Path(cache) / "qemu-smoke" / smoke_key(tar_sha256, overlay)
+    """Build the flash tree of a rootfs with overlay and Wi-Fi, boot it in QEMU, check it."""
+    tar = R.fetch(asset, cache)
+    key = smoke_key(asset.sha256, overlay, wifi.uuid if wifi else "")
+    logs = Path(cache) / "qemu-smoke" / key
     logs.mkdir(parents=True, exist_ok=True)
     outcome = Outcome(logs, overlay is not None)
-    with I.rootfs_tree(tar, overlay, "building the QEMU root") as root:
+    layer = wifi.apply if wifi else None
+    with I.rootfs_tree(tar, overlay, "building the QEMU root", layer) as root:
         install(root)
         sock = root.parent / "virtiofsd.sock"
         qemu = qemu_argv(in_tree(root, "vmlinuz"), in_tree(root, "initrd.img"), sock)
@@ -403,6 +439,8 @@ def smoke(
             text = boot(qemu, virtiofsd_argv(root, sock), sock, logs, timeout)
             outcome.result = Result.from_log(text)
             outcome.checks = evaluate(outcome.result, outcome.overlay)
+            if wifi:
+                outcome.checks += wifi_checks(outcome.result, wifi)
         except (RuntimeError, TimeoutError, ValueError) as e:
             outcome.error = str(e)
     (logs / "result.json").write_text(

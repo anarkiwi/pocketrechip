@@ -23,7 +23,7 @@ jobs:
       - run: pylint src tests
       - run: sudo apt-get update && sudo apt-get install -y shellcheck u-boot-tools mtd-utils
       - run: sudo scripts/install-nand-image-builder.sh /usr/local/bin
-      - run: shellcheck -S warning tools/*/*.sh scripts/*.sh
+      - run: shellcheck -S warning install.sh tools/*.sh scripts/*.sh
       - run: pytest -n auto --cov --cov-report=term-missing --cov-fail-under=85
   docker:
     runs-on: ubuntu-latest

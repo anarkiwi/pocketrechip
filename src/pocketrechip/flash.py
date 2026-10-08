@@ -6,7 +6,8 @@ U-Boot, whose flash bad block table matches the installed bootloader and the ker
 """
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,19 +49,41 @@ def prepare(
     runner: Runner | None = None,
 ) -> Prepared:
     """Fetch and verify the release, pad U-Boot and build (or reuse) the UBIFS image."""
-    fetched = {a.name: R.fetch(a, cache) for a in (R.SPL, R.UBOOT_DTB, R.UBOOT_FEL)}
+    boot = _boot(cache, out)
     tar = R.ROOTFS[flavor]
     ubifs = I.cached_ubifs(tar.sha256, overlay, cache) or I.build_ubifs(
         R.fetch(tar, cache), tar.sha256, overlay, cache, runner
     )
+    return Prepared(flavor, *boot, ubifs)
+
+
+def _boot(cache: Path, out: Path) -> tuple[Path, Path, Path]:
+    """Release U-Boot for FEL, SPL and U-Boot padded to an eraseblock in out."""
+    fetched = {a.name: R.fetch(a, cache) for a in (R.SPL, R.UBOOT_DTB, R.UBOOT_FEL)}
     out.mkdir(parents=True, exist_ok=True)
-    return Prepared(
-        flavor,
+    return (
         fetched[R.UBOOT_FEL.name],
         fetched[R.SPL.name],
         I.pad_uboot(fetched[R.UBOOT_DTB.name], out / "u-boot.pad"),
-        ubifs,
     )
+
+
+@contextmanager
+def prepared(
+    cache: Path,
+    flavor: str,
+    out: Path,
+    overlay: Path | None = None,
+    layer: I.Layer | None = None,
+) -> Iterator[Prepared]:
+    """prepare(); with a (secret-bearing) layer the UBIFS is private, deleted on exit."""
+    if layer is None:
+        yield prepare(cache, flavor, out, overlay)
+        return
+    boot = _boot(cache, out)
+    tar = R.fetch(R.ROOTFS[flavor], cache)
+    with I.private_ubifs(tar, overlay, layer) as ubifs:
+        yield Prepared(flavor, *boot, ubifs)
 
 
 def chunks(total: int, chunk: int) -> list[tuple[int, int]]:

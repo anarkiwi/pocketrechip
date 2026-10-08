@@ -1,33 +1,80 @@
 # pocketrechip
 
-Current Debian (trixie, armhf) with X and touchscreen on the NextThing PocketCHIP.
+Reflash a NextThing PocketCHIP with current Debian (trixie, armhf) with X, touchscreen,
+keyboard and Wi-Fi: NextThingCo's [x-chip-os](https://github.com/NextThingCo/x-chip-os)
+image plus this repo's [tuning overlay](overlay/).
 
-## Usage
+## Requirements
+
+- A Linux computer with [Docker](https://docs.docker.com/engine/install/).
+- A micro-USB data cable, a jumper wire (or paper clip) and a charged PocketCHIP.
+
+## Install
+
+1. Switch the PocketCHIP off: hold the power button for 8 seconds.
+2. Jumper FEL to GND: on the header along the PocketCHIP's top edge, connect the
+   right-most pad, `FEL`, to the pad beside it, `GROUND`
+   ([PocketCHIP docs](https://github.com/NextThingCo/docs/blob/stable/PocketCHIP-docs/source/includes/_glance.md#gpio-access)).
+   On a bare CHIP these are header U14 pin 7 (FEL) and pin 39 (GND)
+   ([CHIP docs](https://github.com/NextThingCo/docs/blob/stable/CHIP-docs/source/includes/_advanced.md#prepare-chip-for-flashing)).
+3. Connect the PocketCHIP's micro-USB port to the computer; press the power button if it
+   stays off.
+4. Run `./install.sh` in this repo. To have it join Wi-Fi on first boot, run
+   `./install.sh --wifi "MyNetwork"` (it prompts for the password).
+5. When it prints `Done`: remove the jumper, unplug USB, hold the power button for
+   8 seconds, then press it. Log in as `chip`, password `chip` (sudo); change the
+   password with `passwd`.
+
+The first run backs up the whole NAND to `cache/devices/<SID>/backup/` before anything
+is written. This takes a while; if interrupted, run `./install.sh` again and it resumes.
+The flash then erases the whole NAND: the old system is gone, only the backup keeps it.
+State is kept per board (SoC SID), so one checkout can reflash several PocketCHIPs.
+
+Options: `--flavor pocketchip|gui|headless`, `--no-backup`, `--verify-backup`,
+`--wifi SSID` with `--wifi-open` or `--wifi-password-file FILE`; `./install.sh --help`
+lists them all. A missing prerequisite (Docker access, `plugdev` group, the udev rule
+`tools/70-pocketrechip.rules`) is reported with the command that fixes it.
+
+## Restore the original system
+
+With the board in FEL as in steps 1-3, `./install.sh restore` writes its backup back.
+
+## Remote USB host
+
+`./install.sh --host HOST [restore] [OPTIONS]` runs on the ssh host `HOST`, which has the
+PocketCHIP on its USB, Docker, and this repo at the same path (a shared filesystem).
+
+## Diagnostics and development
+
+`tools/run.sh [--host HOST] COMMAND [ARGS]` runs any command in the Docker image, with
+`cache/` mounted at `/cache`:
+
+```sh
+tools/run.sh probe --out /cache/probe              # read-only NAND survey over FEL
+tools/run.sh analyze /cache/probe/dram.bin         # decode a probe dump
+tools/run.sh backup --out /cache/backup [--verify] # full NAND backup
+tools/run.sh flash --out /cache/flash --backup /cache/backup [--dry-run]
+tools/run.sh restore --backup /cache/backup [--verify]
+tools/run.sh qemu-smoke [--no-overlay] [--wifi SSID]  # boot the image under QEMU
+tools/run.sh probe-script                          # print the probe's U-Boot script
+```
 
 ```sh
 pip install -e '.[dev]'
-docker build -t pocketrechip .       # tools image: sunxi-tools, dfu-util, mkimage, mtd-utils, QEMU, probe U-Boot
-pocketrechip probe --out DIR         # FEL: read-only NAND survey, decoded (DIR/dram.bin)
-pocketrechip backup --out DIR        # FEL: full NAND backup (nand.raw, nand.ecc, manifest.json)
-pocketrechip flash --out DIR --backup BACKUP [--flavor pocketchip] [--dry-run]
-                                     # FEL: install the Debian trixie release
-pocketrechip restore --out DIR --backup BACKUP [--verify]   # FEL: write a backup back
-pocketrechip analyze DIR/dram.bin    # decode a probe dump (--json for JSON)
-pocketrechip qemu-smoke [--no-overlay]  # boot the flash rootfs under QEMU, check the overlay (root)
-pocketrechip probe-script            # print the probe's U-Boot script
+black --check src tests && pylint src tests
+shellcheck install.sh tools/*.sh scripts/*.sh
+pytest -n auto --cov
 ```
 
-Device commands need the board in FEL on USB, `sunxi-fel`, `dfu-util` and `mkimage`;
-run them in the image with
-`docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -v DIR:/out pocketrechip pocketrechip backup --out /out`.
-
 - `scripts/fetch-sources.sh`: clone the upstream repos into `cache/src/`.
-- `tools/fel-probe/remote.sh HOST NAME CMD`: run a device command on an ssh host sharing this repo's filesystem; `cache/` is `/cache`, output in `cache/NAME/`.
 - `scripts/install-nand-image-builder.sh DEST`: build sunxi-tools' `sunxi-nand-image-builder`.
 - `overlay/`: rootfs tuning applied before `mkfs.ubifs`.
 
 ## Docs
 
-- [docs/probe.md](docs/probe.md): FEL U-Boot agent, safety properties, probe, backup and restore, probe window layout.
-- [docs/flash.md](docs/flash.md): flash and restore procedure, safety properties, rootfs overlay, QEMU smoke test.
-- [docs/sources.md](docs/sources.md): upstream repos, pinned revisions, hardware bring-up facts, known gaps.
+- [docs/flash.md](docs/flash.md): install, flash and restore, Wi-Fi profile, safety
+  properties, rootfs overlay, QEMU smoke test.
+- [docs/probe.md](docs/probe.md): FEL U-Boot agent, safety properties, probe, backup,
+  probe window layout.
+- [docs/sources.md](docs/sources.md): upstream repos, pinned revisions, hardware bring-up
+  facts, known gaps.

@@ -1,0 +1,3 @@
+# Allwinner FEL (1f3a:efe8) and the pocketrechip U-Boot DFU agent (1f3a:1010) for plugdev.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1f3a", ATTRS{idProduct}=="efe8", GROUP="plugdev", MODE="0660"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1f3a", ATTRS{idProduct}=="1010", GROUP="plugdev", MODE="0660"
