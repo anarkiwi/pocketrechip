@@ -24,13 +24,22 @@ RUN for p in sunxi-Add-support-for-slc-emulation-on-mlc-NAND \
   && grep -q "^CONFIG_ENV_IS_NOWHERE=y" .config \
   && for c in HUSH_PARSER CMD_ITEST CMD_MTDPARTS CMD_DFU DFU_RAM; do grep -q "^CONFIG_$c=y" .config || exit 1; done
 
+FROM debian:trixie AS snib
+RUN apt-get update \
+  && apt-get -y install --no-install-recommends gcc libc6-dev make git ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+COPY scripts/install-nand-image-builder.sh /build/
+RUN /build/install-nand-image-builder.sh /build/bin
+
 FROM debian:trixie AS tools
 RUN apt-get update \
-  && apt-get -y install --no-install-recommends sunxi-tools dfu-util u-boot-tools \
+  && apt-get -y install --no-install-recommends sunxi-tools dfu-util u-boot-tools mtd-utils \
        python3 python3-numpy python3-tqdm python3-pip python3-setuptools \
   && rm -rf /var/lib/apt/lists/*
+COPY --from=snib /build/bin/sunxi-nand-image-builder /usr/local/bin/
 COPY pyproject.toml README.md /src/
 COPY src /src/src
 RUN pip install --no-cache-dir --no-deps --no-build-isolation --break-system-packages /src \
   && rm -rf /src
 COPY --from=uboot /build/u-boot/u-boot-sunxi-with-spl.bin /opt/pocketrechip/
+COPY overlay /opt/pocketrechip/overlay

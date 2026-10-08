@@ -1,0 +1,14 @@
+[Unit]
+Description=Swap on zram sized to half of RAM
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=swap.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "modprobe zram && dev=$$(zramctl --find --size $$(awk '/^MemTotal:/ {print int($$2 / 2)}' /proc/meminfo)K) && echo $$dev > /run/zram-swap && mkswap $$dev && swapon -p 100 $$dev"
+ExecStop=/bin/sh -c "dev=$$(cat /run/zram-swap) && swapoff $$dev && zramctl --reset $$dev && rm /run/zram-swap"
+
+[Install]
+WantedBy=swap.target

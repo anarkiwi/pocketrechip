@@ -43,6 +43,11 @@ class Chip:
         """Eraseblocks on the chip."""
         return self.size // ERASEBLOCK
 
+    @property
+    def key(self) -> str:
+        """Short lowercase vendor name."""
+        return self.name.split()[0].lower()
+
 
 NAND_CHIPS = {
     c.size: c
@@ -52,6 +57,7 @@ NAND_CHIPS = {
     )
 }
 CHIP_BY_ID = {c.nfc_id: c for c in NAND_CHIPS.values()}
+CHIP_BY_KEY = {c.key: c for c in NAND_CHIPS.values()}
 
 
 @dataclass(frozen=True)

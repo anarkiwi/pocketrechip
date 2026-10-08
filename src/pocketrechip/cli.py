@@ -2,14 +2,21 @@
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-from . import analyze, backup, probe_script
+from . import analyze, backup, flash, overlay, probe_script, release, restore
 from .fel_agent import Agent
+from .probe_layout import CHIP_BY_KEY, NAND_CHIPS
 from .progress import setup_logging
 
 UBOOT = Path("/opt/pocketrechip/u-boot-sunxi-with-spl.bin")
+CACHE = Path(os.environ.get("POCKETRECHIP_CACHE", "cache"))
+DONE = (
+    "flash complete; the board was reset and is back in FEL: "
+    "remove the FEL jumper and power-cycle it to boot from NAND"
+)
 
 
 def _print_summary(summary: analyze.ProbeSummary, as_json: bool) -> int:
@@ -23,7 +30,9 @@ def _print_summary(summary: analyze.ProbeSummary, as_json: bool) -> int:
 
 def _device_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--out", type=Path, required=True, help="output directory")
-    p.add_argument("--uboot", type=Path, default=UBOOT, help="probe U-Boot image")
+    p.add_argument(
+        "--uboot", type=Path, default=UBOOT, help="probe U-Boot image (read-only agent)"
+    )
     p.add_argument(
         "--timeout", type=float, default=300.0, help="seconds to wait per DFU session"
     )
@@ -57,6 +66,30 @@ def main(argv: list[str] | None = None) -> int:
     pb.add_argument(
         "--verify", action="store_true", help="re-read and compare ECC data"
     )
+    pf = sub.add_parser("flash", help="install the Debian release on NAND over FEL")
+    _device_args(pf)
+    pf.add_argument("--backup", type=Path, required=True, help="complete backup dir")
+    pf.add_argument(
+        "--no-backup", action="store_true", help="flash without a matching backup"
+    )
+    pf.add_argument("--flavor", choices=sorted(release.ROOTFS), default="pocketchip")
+    pf.add_argument("--cache", type=Path, default=CACHE, help="download/image cache")
+    pf.add_argument("--chunk-mib", type=int, default=flash.CHUNK >> 20)
+    pf.add_argument(
+        "--overlay", type=Path, default=overlay.default(), help="rootfs overlay dir"
+    )
+    pf.add_argument("--no-overlay", action="store_true", help="stock rootfs")
+    pf.add_argument("--dry-run", action="store_true", help="host side only, no USB")
+    pf.add_argument(
+        "--chip", choices=sorted(CHIP_BY_KEY), help="dry-run chip (default: backup's)"
+    )
+    pr = sub.add_parser("restore", help="write a backup back to NAND over FEL")
+    _device_args(pr)
+    pr.add_argument("--backup", type=Path, required=True, help="complete backup dir")
+    pr.add_argument("--chunk-ebs", type=int, default=16, help="eraseblocks per session")
+    pr.add_argument(
+        "--verify", action="store_true", help="re-read and compare ECC data"
+    )
     args = p.parse_args(argv)
     setup_logging()
     if args.cmd == "probe-script":
@@ -65,14 +98,42 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "analyze":
         return _print_summary(analyze.load(args.dram), args.json)
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.cmd == "flash":
+        return _flash(args)
     agent = _agent(args)
     if args.cmd == "probe":
         with agent.session(args.uboot):
             dram = probe_script.capture(agent, args.out)
         return _print_summary(analyze.load(dram), args.json)
+    if args.cmd == "restore":
+        res = restore.restore(
+            agent, args.uboot, args.backup, args.chunk_ebs, args.verify
+        )
+        print(json.dumps(res))
+        return 1 if res["failed"] or res["mismatch"] else 0
     opts = backup.Options(args.chunk_ebs, args.oob, args.eraseblocks, args.verify)
     manifest = backup.backup(agent, args.out, args.uboot, opts)
     print(backup.summary(manifest))
+    return 0
+
+
+def _flash(args: argparse.Namespace) -> int:
+    lay = None if args.no_overlay else args.overlay
+    prep = flash.prepare(args.cache, args.flavor, args.out, lay)
+    chunk = args.chunk_mib << 20
+    if args.dry_run:
+        m = None if args.no_backup else flash.check_backup(args.backup)
+        if args.chip:
+            chips = [CHIP_BY_KEY[args.chip]]
+        elif m:
+            chips = [c for c in NAND_CHIPS.values() if c.name == m["chip"]]
+        else:
+            chips = list(NAND_CHIPS.values())
+        print(flash.dry_run(prep, chips, args.out, chunk), end="")
+        return 0
+    backup_dir = None if args.no_backup else args.backup
+    chip = flash.flash(_agent(args), args.uboot, prep, backup_dir, chunk)
+    print(f"{chip.name}: {DONE}")
     return 0
 
 

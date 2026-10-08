@@ -192,6 +192,18 @@ class Agent:
         )
         self.dfu.wait_alt(CMD_ALT, self.timeout)
 
+    def wait_fel(self) -> None:
+        """Poll until the board answers in FEL (after a reset with the FEL pin grounded)."""
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                self.runner(["sunxi-fel", "ver"])
+                return
+            except subprocess.CalledProcessError:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"no FEL device in {self.timeout}s") from None
+                time.sleep(self.dfu.poll)
+
     def next_seq(self) -> int:
         """Sequence number for the next script's entity names."""
         self.seq += 1

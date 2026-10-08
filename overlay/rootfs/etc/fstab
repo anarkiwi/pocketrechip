@@ -1,0 +1,1 @@
+ubi0:rootfs / ubifs noatime 0 0

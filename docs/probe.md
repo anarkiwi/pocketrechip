@@ -9,7 +9,7 @@ any old U-Boot environment.
 ## U-Boot agent
 
 The probe and the backup run on the same FEL-booted U-Boot "agent"
-(`src/pocketrechip/fel_agent.py`). The Docker image builds that U-Boot
+(`src/pocketrechip/fel_agent.py`); `flash` writes on the same loop booted from the release U-Boot ([flash.md](flash.md)). The Docker image builds that U-Boot
 (`x-chip-uboot` `0e17d16` on v2022.01) into `/opt/pocketrechip/u-boot-sunxi-with-spl.bin`;
 `docker run --rm pocketrechip cat /opt/pocketrechip/u-boot-sunxi-with-spl.bin > u-boot.bin`
 extracts it for use outside the container (`--uboot`).
@@ -111,15 +111,8 @@ extracts it for use outside the container (`--uboot`).
 ### Restore
 
 `nand.raw` holds, per eraseblock, 256 × (`0x4000` + oob) bytes exactly as `nand read.raw`
-returned them (randomised data and OOB including ECC bytes), so writing it back with
-`nand write.raw` reproduces the page contents:
-
-```
-nand erase <e*0x400000> 0x400000
-nand write.raw <addr> <e*0x400000> 0x100     # addr holds bytes [e*raw_eb, (e+1)*raw_eb) of nand.raw
-```
-
-Leave eraseblocks that the target's `nand bad` lists untouched; `nand erase` skips them.
+returned them (randomised data and OOB including ECC bytes), so writing them back raw
+reproduces the page contents. `pocketrechip restore` does that; see [flash.md](flash.md#restore).
 
 ## Probe DRAM window
 
