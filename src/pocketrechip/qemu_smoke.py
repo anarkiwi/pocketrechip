@@ -33,7 +33,50 @@ SCRIPT = "usr/local/sbin/pocketrechip-smoke"
 MARK = "@pocketrechip-smoke"
 END = "end"
 QUIET = "dmesg -n 1"
+UBIFS_OPTIONS = frozenset(
+    (
+        "fast_unmount",
+        "norm_unmount",
+        "bulk_read",
+        "no_bulk_read",
+        "chk_data_crc",
+        "no_chk_data_crc",
+        "compr",
+        "auth_key",
+        "auth_hash_name",
+        "ubi",
+        "vol",
+        "assert",
+    )
+)
 JOURNAL_FILES = "find {} -type f -name '*.journal*' 2>/dev/null | wc -l"
+ONE_LINE = ' | awk \'BEGIN { RS = ""; FS = "\\n" } { $1 = $1; print }\''
+MASKED = (
+    "systemd-networkd.service",
+    "systemd-networkd.socket",
+    "systemd-networkd-wait-online.service",
+    "systemd-network-generator.service",
+    "e2scrub_all.timer",
+    "e2scrub_reap.service",
+    "fstrim.timer",
+)
+UPDATES = (
+    "ldconfig.service",
+    "systemd-hwdb-update.service",
+    "systemd-journal-catalog-update.service",
+)
+UDISKS = "udisks2.service"
+NM = "NetworkManager.service"
+BOOT_UNITS = (*MASKED, *UPDATES, UDISKS, NM)
+BOOT_PROPS = "Id,LoadState,ActiveState,ConditionResult,ConditionTimestampMonotonic"
+UDISKS_CALL = (
+    "busctl --timeout=600 call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager"
+    " org.freedesktop.DBus.Properties Get ss org.freedesktop.UDisks2.Manager Version"
+)
+UDISKS_WAIT = (
+    f"timeout 900 sh -c 'until systemctl is-active -q {UDISKS}; do sleep 2; done'"
+)
+BLAME_LINES = 15
 PROBES = {
     "state": "systemctl is-system-running --wait",
     "swap": "swapon --show=NAME,TYPE,SIZE --noheadings --bytes",
@@ -44,12 +87,15 @@ PROBES = {
     "zram_service": "systemctl is-active zram-swap.service",
     "page_cluster": "sysctl -n vm.page-cluster",
     "page_size": "getconf PAGESIZE",
-    "units": "systemctl show -p Id,ActiveState,Result,NRestarts '*'"
-    ' | awk \'BEGIN { RS = ""; FS = "\\n" } { $1 = $1; print }\'',
+    "boot_units": f"systemctl show -p {BOOT_PROPS} {' '.join(BOOT_UNITS)}{ONE_LINE}",
+    "units": f"systemctl show -p Id,ActiveState,Result,NRestarts '*'{ONE_LINE}",
     "nm_keyfiles": f"stat -c '%a %U %n' /{W.DIR}/*{W.SUFFIX}",
     "nm_connections": "nmcli -t -f NAME connection show",
     "analyze": "systemd-analyze",
+    "blame": f"systemd-analyze blame | head -n {BLAME_LINES}",
     "free": "free -k",
+    "udisks_call": f"{UDISKS_CALL} || {{ {UDISKS_WAIT}; {UDISKS_CALL}; }}",
+    "udisks_after": f"systemctl is-active {UDISKS}",
 }
 EXPECTED_FAILURES = {
     "ubihealthd.service": "watches /dev/ubi0, the NAND UBI device; QEMU has no NAND "
@@ -81,13 +127,19 @@ def script() -> str:
     return "\n".join(["#!/bin/sh", QUIET, *lines, *tail]) + "\n"
 
 
+def vfs_options(options: str) -> str:
+    """Mount options without UBIFS's own (Linux fs/ubifs/super.c `tokens`)."""
+    kept = [o for o in options.split(",") if o.split("=", 1)[0] not in UBIFS_OPTIONS]
+    return ",".join(kept) or "defaults"
+
+
 def fstab(text: str) -> str:
-    """fstab with the `/` entry moved to the virtiofs tag, its options kept."""
+    """fstab with the `/` entry moved to the virtiofs tag, its VFS options kept."""
     out = []
     for line in text.splitlines():
         f = line.split()
         if len(f) >= 4 and not f[0].startswith("#") and f[1] == "/":
-            line = f"{TAG} / virtiofs {f[3]} 0 0"
+            line = f"{TAG} / virtiofs {vfs_options(f[3])} 0 0"
         out.append(line + "\n")
     return "".join(out)
 
@@ -155,18 +207,27 @@ def _one(sections: dict[str, list[str]], name: str) -> str:
     return lines[0]
 
 
-def failing(units: list[str]) -> tuple[str, ...]:
-    """Units failed, with a non-success result, or restarted after failing."""
-    out = []
+def properties(units: list[str]) -> dict[str, dict[str, str]]:
+    """`systemctl show` records, one per line, by Id."""
+    out = {}
     for line in units:
         p = dict(kv.split("=", 1) for kv in line.split() if "=" in kv)
-        if "Id" in p and (
-            p.get("ActiveState") == "failed"
+        if "Id" in p:
+            out[p["Id"]] = p
+    return out
+
+
+def failing(units: list[str]) -> tuple[str, ...]:
+    """Units failed, with a non-success result, or restarted after failing."""
+    return tuple(
+        sorted(
+            u
+            for u, p in properties(units).items()
+            if p.get("ActiveState") == "failed"
             or p.get("Result", "success") != "success"
             or int(p.get("NRestarts") or 0)
-        ):
-            out.append(p["Id"])
-    return tuple(sorted(out))
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -185,6 +246,10 @@ class Result:
     mem_total_kib: int
     failing: tuple[str, ...]
     analyze: str
+    boot_units: dict[str, dict[str, str]] = field(default_factory=dict)
+    blame: tuple[str, ...] = ()
+    udisks_call: tuple[str, ...] = ()
+    udisks_after: str = ""
     nm_keyfiles: tuple[str, ...] = ()
     nm_connections: tuple[str, ...] = ()
 
@@ -216,6 +281,10 @@ class Result:
             mem_total_kib=int(mem[0][1]),
             failing=failing(s.get("units", [])),
             analyze="\n".join(s.get("analyze", [])),
+            boot_units=properties(s.get("boot_units", [])),
+            blame=tuple(l.strip() for l in s.get("blame", []) if l.strip()),
+            udisks_call=tuple(l.strip() for l in s.get("udisks_call", []) if l.strip()),
+            udisks_after=_one(s, "udisks_after"),
             nm_keyfiles=tuple(l.strip() for l in s.get("nm_keyfiles", [])),
             nm_connections=tuple(
                 re.sub(r"\\(.)", r"\1", l.strip()) for l in s.get("nm_connections", [])
@@ -267,6 +336,21 @@ def wifi_checks(r: Result, wifi: W.Profile) -> list[Check]:
     ]
 
 
+def _states(r: Result, units: tuple[str, ...], *keys: str) -> str:
+    return ", ".join(
+        f"{u} " + "/".join(r.boot_units.get(u, {}).get(k, "?") for k in keys)
+        for u in units
+    )
+
+
+def _skipped(p: dict[str, str]) -> bool:
+    """Condition checked at boot and failed."""
+    return (
+        p.get("ConditionResult") == "no"
+        and int(p.get("ConditionTimestampMonotonic") or 0) > 0
+    )
+
+
 def evaluate(r: Result, overlay: bool) -> list[Check]:
     """Overlay effects present with the overlay, absent without; no unexpected failures."""
     size = zram_swap_bytes(r.mem_total_kib, r.page_size)
@@ -293,11 +377,38 @@ def evaluate(r: Result, overlay: bool) -> list[Check]:
         ("plocate timer", "masked", r.plocate_timer, r.plocate_timer == "masked"),
         ("zram-swap.service", "active", r.zram_service, r.zram_service == "active"),
         ("vm.page-cluster", "0", r.page_cluster, r.page_cluster == 0),
+        (
+            "masked units",
+            "masked/inactive: " + ", ".join(MASKED),
+            _states(r, MASKED, "LoadState", "ActiveState"),
+            all(
+                (b := r.boot_units.get(u, {})).get("LoadState") == "masked"
+                and b.get("ActiveState") == "inactive"
+                for u in MASKED
+            ),
+        ),
+        (
+            "udisks2 on demand",
+            "inactive after boot, active after a D-Bus call returning its version",
+            f"{_states(r, (UDISKS,), 'ActiveState')}; busctl {'; '.join(r.udisks_call) or '-'}; "
+            f"then {r.udisks_after}",
+            r.boot_units.get(UDISKS, {}).get("ActiveState") == "inactive"
+            and re.fullmatch(r'v s "[^"]+"', "".join(r.udisks_call[-1:])) is not None
+            and r.udisks_after == "active",
+        ),
+        (
+            "first-boot updates skipped",
+            "condition failed: " + ", ".join(UPDATES),
+            _states(r, UPDATES, "ConditionResult", "ActiveState"),
+            all(_skipped(r.boot_units.get(u, {})) for u in UPDATES),
+        ),
     ]
     checks = [
         Check(name, exp if overlay else f"not {exp}", str(obs), present == overlay)
         for name, exp, obs, present in effects
     ]
+    nm_state = r.boot_units.get(NM, {}).get("ActiveState", "?")
+    checks.append(Check(NM, "active", nm_state, nm_state == "active"))
     unexpected = set(r.failing) - set(EXPECTED_FAILURES)
     checks.append(
         Check(
@@ -321,7 +432,7 @@ def report(r: Result, checks: list[Check]) -> str:
         for u in r.failing
         if u in EXPECTED_FAILURES
     ]
-    return "\n".join([*lines, f"system state: {r.state}", r.analyze]) + "\n"
+    return "\n".join([*lines, f"system state: {r.state}", r.analyze, *r.blame]) + "\n"
 
 
 def smoke_key(tar_sha256: str, overlay: Path | None, wifi: str = "") -> str:

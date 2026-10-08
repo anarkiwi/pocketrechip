@@ -1,1 +1,1 @@
-ubi0:rootfs / ubifs noatime 0 0
+ubi0:rootfs / ubifs noatime,bulk_read 0 0

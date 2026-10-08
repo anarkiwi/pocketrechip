@@ -1,4 +1,5 @@
-"""Rootfs overlay: a tree of files and symlinks copied over the root plus paths to remove.
+"""Rootfs overlay: a tree of files and symlinks copied over the root plus paths to remove,
+then systemd's update stamps when the tree's caches are current (update_done).
 
 File modes are normalised as git stores them (0755 if any execute bit, else 0644) so the
 digest and the result do not depend on the checkout's umask.
@@ -8,6 +9,8 @@ import hashlib
 import os
 import shutil
 from pathlib import Path
+
+from . import update_done
 
 TREE, REMOVE = "rootfs", "remove"
 SEARCH = (
@@ -52,7 +55,7 @@ def digest(overlay: Path | None) -> str:
     """sha256 over removals, paths, types, modes, contents and link targets."""
     if overlay is None:
         return "none"
-    h = hashlib.sha256()
+    h = hashlib.sha256(b"update-stamps\0")
     for rel in removals(overlay):
         h.update(b"rm\0" + bytes(rel) + b"\0")
     for rel, src in entries(overlay):
@@ -84,7 +87,7 @@ def _clear(dst: Path) -> None:
 
 
 def apply(overlay: Path, root: Path, uid: int = 0, gid: int = 0) -> None:
-    """Remove the listed paths, then copy the tree over root owned by uid:gid."""
+    """Remove the listed paths, copy the tree over root owned by uid:gid, then stamp."""
     for rel in removals(overlay):
         _clear(_inside(root, rel))
     for rel, src in entries(overlay):
@@ -105,3 +108,4 @@ def apply(overlay: Path, root: Path, uid: int = 0, gid: int = 0) -> None:
                 shutil.copyfile(src, dst)
                 os.chmod(dst, _mode(src))
         os.lchown(dst, uid, gid)
+    update_done.stamp(root, uid, gid)

@@ -1,1 +1,10 @@
 etc/systemd/system/timers.target.wants/plocate-updatedb.timer
+etc/systemd/system/graphical.target.wants/udisks2.service
+etc/systemd/system/timers.target.wants/e2scrub_all.timer
+etc/systemd/system/timers.target.wants/fstrim.timer
+etc/systemd/system/multi-user.target.wants/e2scrub_reap.service
+etc/systemd/system/multi-user.target.wants/systemd-networkd.service
+etc/systemd/system/sockets.target.wants/systemd-networkd.socket
+etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service
+etc/systemd/system/sysinit.target.wants/systemd-network-generator.service
+etc/systemd/system/dbus-org.freedesktop.network1.service

@@ -10,9 +10,17 @@ import subprocess
 import pytest
 
 from pocketrechip import overlay as O
+from pocketrechip import qemu_smoke as Q
 
 REPO = O.SEARCH[0]
 ZRAM = "etc/systemd/system/zram-swap.service"
+WANTS = (
+    "etc/systemd/system/graphical.target.wants/udisks2.service",
+    "etc/systemd/system/timers.target.wants/e2scrub_all.timer",
+    "etc/systemd/system/timers.target.wants/fstrim.timer",
+    "etc/systemd/system/multi-user.target.wants/e2scrub_reap.service",
+    "etc/systemd/system/multi-user.target.wants/systemd-networkd.service",
+)
 
 
 def fake_root(tmp_path):
@@ -22,6 +30,9 @@ def fake_root(tmp_path):
     (root / "etc/fstab").write_text("# UNCONFIGURED FSTAB FOR BASE SYSTEM\n")
     (wants / "plocate-updatedb.timer").symlink_to("/lib/systemd/system/x.timer")
     (root / "etc/systemd/system/plocate-updatedb.timer").write_text("old")
+    for link in WANTS:
+        (root / link).parent.mkdir(parents=True, exist_ok=True)
+        (root / link).symlink_to(f"/usr/lib/systemd/system/{link.split('/')[-1]}")
     return root
 
 
@@ -41,7 +52,9 @@ def test_repo_overlay_applies_and_is_idempotent(tmp_path):
     ids = (os.getuid(), os.getgid())
     O.apply(REPO, root, *ids)
     snap = snapshot(root)
-    assert (root / "etc/fstab").read_text() == "ubi0:rootfs / ubifs noatime 0 0\n"
+    assert (
+        root / "etc/fstab"
+    ).read_text() == "ubi0:rootfs / ubifs noatime,bulk_read 0 0\n"
     assert not os.path.lexists(
         root / "etc/systemd/system/timers.target.wants/plocate-updatedb.timer"
     )
@@ -57,6 +70,17 @@ def test_repo_overlay_applies_and_is_idempotent(tmp_path):
     assert (root / "etc/sysctl.d/90-pocketrechip-zram.conf").read_text() == (
         "vm.page-cluster = 0\n"
     )
+    assert not any(os.path.lexists(root / l) for l in WANTS)
+    masks = {
+        p.name
+        for p in (root / "etc/systemd/system").iterdir()
+        if p.is_symlink() and os.readlink(p) == "/dev/null"
+    }
+    assert masks == {*Q.MASKED, "plocate-updatedb.timer"}
+    assert (root / "etc/systemd/system-preset/80-pocketrechip.preset").read_text() == (
+        "disable udisks2.service\n"
+    )
+    assert not os.path.lexists(root / "etc/systemd/system" / Q.UDISKS)
     assert snap[ZRAM][1] & 0o7777 == 0o644
     assert snap["etc/systemd/journald.conf.d"][1] & 0o7777 == 0o755
     assert {v[2:] for v in snap.values()} == {ids}

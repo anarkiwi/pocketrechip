@@ -157,18 +157,76 @@ MB/s, ETA).
 
 `overlay/rootfs/` is copied over the extracted root (files 0644/0755 as git stores them,
 directories 0755, symlinks as is, all `root:root`), after deleting the paths in
-`overlay/remove`. Files and symlinks only: the host has no armhf binfmt, so nothing runs
-in the image. `--no-overlay` builds the stock rootfs.
+`overlay/remove`, then the update stamps below are written. Files and symlinks only: the
+host has no armhf binfmt, so nothing runs in the image. `--no-overlay` builds the stock
+rootfs.
+
+The tar's `/etc/machine-id` is `uninitialized`, so the first boot runs systemd's
+`preset-all` (enable-only): every unit with an `[Install]` section that no preset
+disables is enabled, as Debian ships only `90-systemd.preset` and no `99-default.preset`.
+A removed wants link alone is re-created then; masks and `disable` presets hold.
 
 | Item | Reason |
 |---|---|
-| `etc/fstab`: `ubi0:rootfs / ubifs noatime 0 0` | The stock file is the `UNCONFIGURED` stub; `systemd-remount-fs` applies `noatime`, saving a NAND write per file read. Root is mounted rw by the kernel command line. |
+| `etc/fstab`: `ubi0:rootfs / ubifs noatime,bulk_read 0 0` | The stock file is the `UNCONFIGURED` stub; `systemd-remount-fs` applies the options. Root is mounted rw by the kernel command line. `noatime` saves a NAND write per file read. `bulk_read` (Linux `Documentation/filesystems/ubifs.rst`) reads consecutive data nodes of a file in one go; otherwise each 4 KiB data node costs a whole 16 KiB NAND page read. On the device a cold read of a 32 MiB file took 23.5 s with `no_bulk_read` and 8.8 s with `bulk_read`, repeatably. |
 | `etc/systemd/journald.conf.d/90-pocketrechip.conf`: `Storage=volatile` | `/var/log/journal` exists, so the journal would be persistent on NAND; keep it in RAM. There is no rsyslog. |
 | `etc/systemd/system/zram-swap.service`, enabled by `swap.target.wants/zram-swap.service` | Compressed swap in RAM: `modprobe zram` (the 6.12 `-chip` kernel ships `zram.ko`), `zramctl --find --size` half of `MemTotal` (zram-generator's default size, `min(ram / 2, 4096)` MiB), `mkswap`, `swapon -p 100`, with the kernel's default compressor. Ordered after `systemd-modules-load`, before `swap.target`, without default dependencies; stop does `swapoff` and `zramctl --reset`. |
 | `etc/sysctl.d/90-pocketrechip-zram.conf`: `vm.page-cluster = 0` | Swap readahead has no benefit on zram. |
 | `plocate-updatedb.timer` masked (`-> /dev/null`) and its `timers.target.wants` link removed | Daily full-filesystem scans cost NAND reads, CPU and index writes. |
+| `systemd-networkd.service`, `.socket`, `systemd-networkd-wait-online.service`, `systemd-network-generator.service` masked; their wants links and the `dbus-org.freedesktop.network1.service` alias removed | NetworkManager (`plugins=ifupdown,keyfile`) owns `wlan0`; networkd manages nothing (`/etc/systemd/network` is empty, `networkctl` shows every link unmanaged) and only `90-systemd.preset` enables it on first boot. Nothing else needs it: `apt-daily*.service` only order after it, `storage-target-mode.target` is not used and `network-online.target` is reached through `NetworkManager-wait-online.service`. |
+| `graphical.target.wants/udisks2.service` removed; `etc/systemd/system-preset/80-pocketrechip.preset`: `disable udisks2.service` | Not started at boot; D-Bus activation (`org.freedesktop.UDisks2.service`, `SystemdService=udisks2.service`) starts it when a client such as gvfs asks. The preset keeps the first-boot `preset-all` from re-enabling it. Not masked, which would break activation. |
+| `e2scrub_all.timer`, `e2scrub_reap.service`, `fstrim.timer` masked, their wants links removed | The root is UBIFS: no ext4, no LVM snapshots to scrub, no discard to trim. |
+| `/etc/.updated`, `/var/.updated` (written by code, `update_done.py`) | See below. |
 
-`/tmp` is already tmpfs through Debian's `tmp.mount`. UBIFS compression stays zlib.
+### Update stamps
+
+Without `/etc/.updated` and `/var/.updated` every `ConditionNeedsUpdate=` unit runs on
+the first boot (`ldconfig`, `systemd-journal-catalog-update`, `systemd-hwdb-update`,
+`systemd-sysusers`, `systemd-update-done`), though the tar already holds their outputs.
+`update_done.stamp` writes both stamps as `systemd-update-done` does in systemd v257 (the
+tar's `libsystemd-shared-257.so`, Debian `257.13-1~deb13u1`):
+
+- `src/update-done/update-done.c`: the three `# This file was created by
+  systemd-update-done...` comment lines, then `TIMESTAMP_NSEC=` /usr's mtime in
+  nanoseconds; the file's atime and mtime are set to /usr's mtime; mode 0644.
+- `src/shared/condition.c` `condition_test_needs_update`: an update is needed when the
+  stamp is missing or /usr's mtime is newer: seconds first, then nanoseconds, then
+  `TIMESTAMP_NSEC=` when the stamp's mtime has no nanoseconds.
+
+Only when no update is due: the units with `ConditionNeedsUpdate=` are read from the tree
+(`/etc/systemd/system`, `/usr/local/lib/systemd/system`, `/usr/lib/systemd/system`,
+drop-ins included, masked units skipped), and each must be in `update_done.OUTPUTS` with
+every output a regular file at least as new as /usr:
+
+| Unit | Output |
+|---|---|
+| `ldconfig.service` | `/etc/ld.so.cache` |
+| `systemd-journal-catalog-update.service` | `/var/lib/systemd/catalog/database` |
+| `systemd-hwdb-update.service` | `/usr/lib/udev/hwdb.bin`; `/etc/udev/hwdb.bin` when `/etc/udev/hwdb.d` has `*.hwdb` |
+| `systemd-sysusers.service` | `/etc/passwd`, `/etc/group`, `/etc/shadow`, `/etc/gshadow` |
+| `systemd-update-done.service` | the stamps themselves |
+
+Otherwise (an unknown unit, a missing or older output) no stamp is written and the reasons
+are logged. The overlay digest covers this step, so cached images are rebuilt.
+
+### Boot time
+
+`systemd-analyze` on the first device boot of the image without these items showed a
+critical chain through `ldconfig.service` (`ConditionNeedsUpdate=/etc`) and
+`sshd-keygen.service` to `ssh.service`, and, off the chain but costly on one core,
+NetworkManager, udisks2, `dpkg-db-backup` (the timer's `Persistent=` catch-up),
+systemd-networkd and bluetooth. Left as is:
+
+- `sshd-keygen.service` generates the host keys on the first boot only; they must be
+  unique per device, so they are not pre-generated in the image.
+- NetworkManager, bluetooth and `dpkg-db-backup.timer`.
+
+Reads from NAND bound much of the rest: about 5 MB/s raw from `/dev/ubi0_0`, and a cold
+32 MiB file read took 23.5 s without `bulk_read` and 8.8 s with it.
+
+`/tmp` is already tmpfs through Debian's `tmp.mount`. UBIFS compression stays zlib: raw
+`/dev/ubi0_0` reads run at about 5 MB/s on the device, while zlib inflate on the A8 runs
+at about 18 MB/s with a 2.3x ratio, so compressed reads are faster than uncompressed ones.
 
 ## QEMU smoke test
 
@@ -194,7 +252,9 @@ extracted tar with the overlay applied) and boots it with its own `/vmlinuz` and
   `root=rootfs rootfstype=virtiofs rw console=ttyAMA0 panic=-1`.
 - `highmem=off`: the kernel has no `ARM_LPAE`, so every `virt` device must sit below 4 GiB.
 - Changes to the test copy only: fstab's `/` entry becomes `rootfs / virtiofs <its
-  options> 0 0`, so `systemd-remount-fs` applies the overlay's `noatime` as on NAND (the
+  options> 0 0` without the UBIFS-only options (`qemu_smoke.UBIFS_OPTIONS`, the `tokens`
+  table of Linux `fs/ubifs/super.c`: `bulk_read`, `no_bulk_read`, `chk_data_crc`,
+  `compr=`, ...), so `systemd-remount-fs` applies the overlay's `noatime` as on NAND (the
   stock fstab has no `/` entry and stays as is); `pocketrechip-smoke.service`
   (`WantedBy=` and `After=multi-user.target`) waits for
   `systemctl is-system-running --wait`, sets the console log level to 1 so kernel
@@ -214,11 +274,20 @@ extracted tar with the overlay applied) and boots it with its own `/vmlinuz` and
 | `systemctl is-enabled plocate-updatedb.timer` | `masked` | not `masked` |
 | `systemctl is-active zram-swap.service` | `active` | not `active` |
 | `sysctl -n vm.page-cluster` | `0` | not `0` |
+| `systemctl show` of the masked units | all `LoadState=masked`, `ActiveState=inactive` | otherwise |
+| `udisks2.service` after boot, `busctl call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager org.freedesktop.DBus.Properties Get ss org.freedesktop.UDisks2.Manager Version`, then `systemctl is-active udisks2` | `inactive`, `v s "<version>"` (the last call), `active` | otherwise |
+| `ldconfig`, `systemd-hwdb-update`, `systemd-journal-catalog-update` | `ConditionResult=no` with a condition timestamp (skipped this boot) | otherwise |
+| `NetworkManager.service` | `active` | same |
+| failing units: `ActiveState=failed`, `Result` not `success`, or `NRestarts` > 0 | only expected ones | only expected ones |
 | `stat` of the `--wifi` keyfile | `600 root` | same |
 | `nmcli -t -f NAME connection show` | lists the `--wifi` SSID | same |
 
-The Wi-Fi rows apply with `--wifi`; QEMU has no radio, so the profile is loaded, never connected.
-| failing units: `ActiveState=failed`, `Result` not `success`, or `NRestarts` > 0 | only expected ones | only expected ones |
+The Wi-Fi rows apply with `--wifi`; QEMU has no radio (no `wlan0`), so the profile is
+loaded, never connected. Under TCG udisks2 can take longer to start than dbus-daemon's
+25 s `service_start_timeout`, so a failed first call (which still started the unit) is
+followed by waiting for `udisks2.service` to be active and calling again.
+`systemd-hwdb-update` is skipped without the overlay too (its
+other conditions need `/etc/udev/hwdb.d` sources or a missing `/usr/lib/udev/hwdb.bin`).
 
 Expected failures (`qemu_smoke.EXPECTED_FAILURES`): `ubihealthd.service` runs
 `ubihealthd -d /dev/ubi0` with `Restart=on-failure`; QEMU has no NAND or UBI, so it
@@ -227,8 +296,8 @@ restarts in a loop, too slowly to hit its start limit, which is why `NRestarts` 
 longer than the 90 s device timeout for `dev-ttyAMA0.device`, so
 `serial-getty@ttyAMA0` (generated from `console=ttyAMA0`; the PocketCHIP console is
 `ttyS0`) may log a dependency failure. The exit status is non-zero when the boot does
-not finish or any check fails; `systemd-analyze` and the system state are printed for
-information.
+not finish or any check fails; the system state, `systemd-analyze` and the top of
+`systemd-analyze blame` are printed for information.
 
 CI's `qemu-smoke` job runs it with the overlay, caching the release tar under its pinned
 sha256 and keeping `cache/qemu-smoke` as an artifact.
@@ -245,6 +314,11 @@ sha256 and keeping `cache/qemu-smoke` as an artifact.
 | `plocate-updatedb.timer` | `masked` | `enabled` |
 | `zram-swap.service` | `active` | `inactive` |
 | `vm.page-cluster` | `0` | `3` |
+| networkd, e2scrub, fstrim units | all `masked`, `inactive` | `loaded`; networkd, its socket, the generator and both timers `active` |
+| `udisks2.service` | `inactive` after boot; the first call hits the 25 s activation timeout, the second returns `v s "2.10.1"`; then `active` | `active` after boot |
+| `ldconfig`, `systemd-journal-catalog-update` | skipped (`ConditionResult=no`) | ran |
+| `systemd-hwdb-update` | skipped | skipped |
+| `NetworkManager.service` | `active` | `active` |
 | failing units | `ubihealthd.service` (expected) | `ubihealthd.service` (expected) |
 
 ## Restore

@@ -20,6 +20,36 @@ from pocketrechip import release as R
 from pocketrechip import wifi as W
 
 MEM_KIB, PAGE = 494788, 4096
+
+
+def show(unit, load="loaded", active="inactive", cond="yes", at=1):
+    return (
+        f"Id={unit} LoadState={load} ActiveState={active} ConditionResult={cond}"
+        f" ConditionTimestampMonotonic={at}"
+    )
+
+
+BOOT_UNITS = {
+    **{u: show(u, "masked", cond="yes", at=0) for u in Q.MASKED},
+    **{u: show(u, cond="no", at=5000) for u in Q.UPDATES},
+    Q.UDISKS: show(Q.UDISKS, at=0),
+    Q.NM: show(Q.NM, active="active"),
+}
+BASE_UNITS = (
+    *(show(u, active="active") for u in Q.MASKED),
+    show("ldconfig.service", active="active"),
+    *(BOOT_UNITS[u] for u in Q.UPDATES[1:]),
+    show(Q.UDISKS, active="active"),
+    BOOT_UNITS[Q.NM],
+)
+
+
+def boot(*lines, base=tuple(BOOT_UNITS.values()), drop=()):
+    """boot_units probe lines: base with lines replacing the same Id, drop removed."""
+    ids = {*Q.properties(lines), *drop}
+    return {"boot_units": [l for l in base if l.split()[0][3:] not in ids] + [*lines]}
+
+
 OVERLAY = {
     "state": ["running"],
     "swap": [f"/dev/zram0 partition {Q.zram_swap_bytes(MEM_KIB, PAGE)}"],
@@ -35,7 +65,11 @@ OVERLAY = {
         "Id=ssh.service ActiveState=active Result=success NRestarts=0",
         "Id=-.mount ActiveState=active Result=success",
     ],
+    "boot_units": list(BOOT_UNITS.values()),
     "analyze": ["Startup finished in 1s (kernel) + 2s (userspace) = 3s"],
+    "blame": ["9.000s sshd-keygen.service", "1.000s NetworkManager.service"],
+    "udisks_call": ['v s "2.10.1"'],
+    "udisks_after": ["active"],
     "free": [
         "               total        used        free",
         f"Mem:          {MEM_KIB}       52012      337568",
@@ -51,6 +85,7 @@ BASELINE = OVERLAY | {
     "plocate_timer": ["enabled"],
     "zram_service": ["inactive"],
     "page_cluster": ["3"],
+    "boot_units": list(BASE_UNITS),
 }
 
 
@@ -121,7 +156,7 @@ def test_zram_swap_bytes_follows_zram_and_mkswap():
 def test_evaluate_passes(overlay, sections):
     checks = Q.evaluate(Q.Result.from_log(serial(sections)), overlay)
     assert [c.name for c in checks if not c.ok] == []
-    assert len(checks) == 7
+    assert len(checks) == 11
 
 
 BREAKS = {
@@ -138,6 +173,23 @@ BREAKS = {
     "plocate timer": [{"plocate_timer": ["enabled"]}],
     "zram-swap.service": [{"zram_service": ["failed"]}],
     "vm.page-cluster": [{"page_cluster": ["3"]}],
+    "masked units": [
+        boot(show(Q.MASKED[0], active="active")),
+        boot(show(Q.MASKED[-1], "masked", "failed")),
+        boot(drop=Q.MASKED[:1]),
+    ],
+    "udisks2 on demand": [
+        boot(show(Q.UDISKS, active="active")),
+        {"udisks_call": ["Call failed: Connection timed out"]},
+        {"udisks_call": ['v s "2.10.1"', "Call failed: Connection timed out"]},
+        {"udisks_call": []},
+        {"udisks_after": ["inactive"]},
+    ],
+    "first-boot updates skipped": [
+        boot(show("ldconfig.service", cond="yes")),
+        boot(show("systemd-hwdb-update.service", cond="no", at=0)),
+    ],
+    Q.NM: [boot(show(Q.NM, active="failed")), boot(drop=(Q.NM,))],
     "failing units": [
         {"units": ["Id=zram-swap.service ActiveState=failed Result=exit-code"]}
     ],
@@ -161,6 +213,17 @@ def test_evaluate_reports_each_failure(name, change):
         ("plocate timer", {"plocate_timer": ["masked"]}),
         ("zram-swap.service", {"zram_service": ["active"]}),
         ("vm.page-cluster", {"page_cluster": ["0"]}),
+        ("masked units", boot(*(BOOT_UNITS[u] for u in Q.MASKED), base=BASE_UNITS)),
+        ("udisks2 on demand", boot(BOOT_UNITS[Q.UDISKS], base=BASE_UNITS)),
+        (
+            "udisks2 on demand",
+            boot(BOOT_UNITS[Q.UDISKS], base=BASE_UNITS)
+            | {"udisks_call": ["Call failed: timed out", 'v s "2.10.1"']},
+        ),
+        (
+            "first-boot updates skipped",
+            boot(*(BOOT_UNITS[u] for u in Q.UPDATES), base=BASE_UNITS),
+        ),
     ],
 )
 def test_baseline_flags_overlay_effects(name, change):
@@ -173,7 +236,8 @@ def test_baseline_flags_overlay_effects(name, change):
 def test_report_lists_checks_and_expected_failures():
     r = Q.Result.from_log(serial(OVERLAY))
     text = Q.report(r, Q.evaluate(r, True))
-    assert text.count("PASS") == 7 and "FAIL" not in text
+    assert text.count("PASS") == 11 and "FAIL" not in text
+    assert text.endswith("9.000s sshd-keygen.service\n1.000s NetworkManager.service\n")
     assert "ubihealthd.service is expected to fail: watches /dev/ubi0" in text
     assert "system state: running" in text
 
@@ -187,6 +251,31 @@ def test_fstab_moves_root_to_virtiofs_keeping_options():
     )
     stub = "# UNCONFIGURED FSTAB FOR BASE SYSTEM\n"
     assert Q.fstab(stub) == stub
+
+
+@pytest.mark.parametrize(
+    "options,kept",
+    [
+        ("noatime,bulk_read", "noatime"),
+        ("ro,no_bulk_read,chk_data_crc,compr=zstd,nodev", "ro,nodev"),
+        (
+            "bulk_read,auth_key=k,auth_hash_name=sha256,ubi=0,vol=1,assert=panic",
+            "defaults",
+        ),
+        (
+            "fast_unmount,norm_unmount,no_chk_data_crc,relatime,x-systemd.a=b",
+            "relatime,x-systemd.a=b",
+        ),
+    ],
+)
+def test_vfs_options_drop_ubifs_options(options, kept):
+    assert Q.vfs_options(options) == kept
+
+
+def test_device_fstab_has_bulk_read():
+    fields = (O.SEARCH[0] / "rootfs/etc/fstab").read_text().split()
+    assert fields[:3] == ["ubi0:rootfs", "/", "ubifs"]
+    assert set(fields[3].split(",")) == {"noatime", "bulk_read"}
 
 
 def test_unit_file():
@@ -208,7 +297,7 @@ STUBS = {
         printf 'Id=b.mount\\nActiveState=active\\nResult=success\\n' ;;
   is-system-running) echo running ;;
   is-enabled) echo masked ;;
-  is-active) echo active ;;
+  is-active) [ "$2" = -q ] || echo active ;;
   poweroff) echo "poweroff $*" >&2 ;;
 esac""",
     "dmesg": 'echo "dmesg $*" >&2',
@@ -216,7 +305,9 @@ esac""",
     "findmnt": "echo rw,noatime",
     "sysctl": "echo 0",
     "getconf": "echo 4096",
-    "systemd-analyze": "echo Startup finished",
+    "systemd-analyze": 'echo "Startup finished $*"',
+    "busctl": """if [ -e "$0.done" ]; then echo 'v s "2.10.1"'; else
+  touch "$0.done"; echo 'Call failed: timed out' >&2; exit 1; fi""",
     "free": f"echo 'total used'; echo 'Mem: {MEM_KIB} 1 2'; echo 'warning' >&2",
 }
 
@@ -243,6 +334,9 @@ def test_script_runs_every_probe_through_the_marker(tmp_path):
     )
     r = Q.Result.from_log(run.stdout)
     assert r.failing == ("a.service",) and r.plocate_timer == "masked"
+    assert r.udisks_call == ("Call failed: timed out", 'v s "2.10.1"')
+    assert r.udisks_after == "active"
+    assert r.blame == ("Startup finished blame",)
 
 
 def fake_root(tmp_path, kernel_link="boot/vmlinuz-6"):
