@@ -18,7 +18,7 @@ run them in the image with
 `docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -v DIR:/out pocketrechip pocketrechip backup --out /out`.
 
 - `scripts/fetch-sources.sh`: clone the upstream repos into `cache/src/`.
-- `tools/fel-probe/remote.sh HOST OUT CMD`: run a device command in the image on an ssh host.
+- `tools/fel-probe/remote.sh HOST NAME CMD`: run a device command on an ssh host sharing this repo's filesystem; output in `cache/NAME/`.
 
 ## Docs
 
