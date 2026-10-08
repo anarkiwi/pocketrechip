@@ -81,7 +81,40 @@ def test_upload_checks_size(tmp_path):
         return ""
 
     with pytest.raises(IOError, match="0x3 bytes, expected 0x4"):
-        A.Dfu(runner).upload("raw1", tmp_path / "x.bin", 4)
+        A.Dfu(runner, attempts=1).upload("raw1", tmp_path / "x.bin", 4)
+
+
+def test_upload_retries_after_transfer_error(tmp_path):
+    calls = []
+
+    def runner(argv):
+        calls.append("-l" if "-l" in argv else "-U")
+        if "-l" in argv:
+            return LISTING
+        if calls.count("-U") == 1:
+            raise A.ToolError(74, argv, "", "dfu-util: Error during upload")
+        (tmp_path / "x.bin").write_bytes(b"abcd")
+        return ""
+
+    A.Dfu(runner, poll=0).upload("raw3", tmp_path / "x.bin", 4)
+    assert calls == ["-U", "-l", "-U"]
+    assert (tmp_path / "x.bin").read_bytes() == b"abcd"
+
+
+def test_upload_gives_up_after_attempts(tmp_path):
+    def runner(argv):
+        if "-l" in argv:
+            return LISTING
+        raise A.ToolError(74, argv, "", "dfu-util: Error during upload")
+
+    with pytest.raises(A.ToolError, match="Error during upload"):
+        A.Dfu(runner, poll=0, attempts=2).upload("raw3", tmp_path / "x.bin", 4)
+
+
+def test_subprocess_runner_reports_stderr():
+    with pytest.raises(A.ToolError, match="no such alt"):
+        A.subprocess_runner(["sh", "-c", "echo no such alt >&2; exit 74"])
+    assert A.subprocess_runner(["sh", "-c", "echo ok"]) == "ok\n"
 
 
 def test_upload_replaces_existing_file(tmp_path):

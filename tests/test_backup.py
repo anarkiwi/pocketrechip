@@ -158,12 +158,13 @@ def test_resume_after_failure(tmp_path):
         if "-U" not in argv:
             return False
         uploads.append(argv)
-        return len(uploads) == 7
+        return len(uploads) >= 7
 
     dev = FakeDevice(nand, fail=fail)
     with pytest.raises(subprocess.CalledProcessError):
         run_backup(tmp_path, dev)
     assert dev.state == "fel"
+    assert len({tuple(a) for a in uploads[6:]}) == 1 and len(uploads) == 9
     out = tmp_path / "out"
     m = B.load_manifest(out)
     assert (m["next_eraseblock"], m["complete"], len(m["status"])) == (8, False, 8)

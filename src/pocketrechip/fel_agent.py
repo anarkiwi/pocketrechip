@@ -30,9 +30,19 @@ Runner = Callable[[Sequence[str]], str]
 FOUND_RE = re.compile(rf'^Found DFU: \[{DFU_ID}\] .*\balt=(\d+), name="([^"]*)"', re.M)
 
 
+class ToolError(subprocess.CalledProcessError):
+    """CalledProcessError whose message carries the tool's stderr."""
+
+    def __str__(self) -> str:
+        return f"{super().__str__()}: {(self.stderr or '').strip()}"
+
+
 def subprocess_runner(argv: Sequence[str]) -> str:
-    """Run a tool, raising on failure; returns stdout."""
-    return subprocess.run(list(argv), check=True, capture_output=True, text=True).stdout
+    """Run a tool, raising ToolError on failure; returns stdout."""
+    res = subprocess.run(list(argv), capture_output=True, text=True, check=False)
+    if res.returncode:
+        raise ToolError(res.returncode, res.args, res.stdout, res.stderr)
+    return res.stdout
 
 
 def alt_info(entities: Iterable[tuple[str, int, int]]) -> str:
@@ -89,9 +99,17 @@ def mkimage(text: str, path: Path, runner: Runner = subprocess_runner) -> Path:
 class Dfu:
     """dfu-util wrapper for the agent's DFU gadget."""
 
-    def __init__(self, runner: Runner | None = None, poll: float = 0.5):
+    def __init__(
+        self,
+        runner: Runner | None = None,
+        poll: float = 0.5,
+        attempts: int = 3,
+        retry_timeout: float = 30.0,
+    ):
         self.runner = runner or subprocess_runner
         self.poll = poll
+        self.attempts = attempts
+        self.retry_timeout = retry_timeout
 
     def _dfu(self, *args: str) -> str:
         return self.runner(["dfu-util", "-d", DFU_ID, *args])
@@ -121,14 +139,22 @@ class Dfu:
         if detach:
             self._dfu("-a", alt, "-e")
 
-    def upload(self, alt: str, path: Path, size: int) -> Path:
-        """Upload an alt of known size to path."""
+    def _upload_once(self, alt: str, path: Path, size: int) -> Path:
         path.unlink(missing_ok=True)
         self._dfu("-a", alt, "-U", str(path), "-Z", str(size))
-        got = path.stat().st_size
+        got = path.stat().st_size if path.exists() else 0
         if got != size:
             raise IOError(f"{alt}: uploaded {got:#x} bytes, expected {size:#x}")
         return path
+
+    def upload(self, alt: str, path: Path, size: int) -> Path:
+        """Upload an alt of known size to path, re-waiting for the alt between attempts."""
+        for _ in range(self.attempts - 1):
+            try:
+                return self._upload_once(alt, path, size)
+            except (subprocess.CalledProcessError, IOError):
+                self.wait_alt(alt, self.retry_timeout)
+        return self._upload_once(alt, path, size)
 
 
 class Agent:
