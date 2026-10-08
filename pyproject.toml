@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pocketrechip"
+version = "0.1.0"
+description = "Flash NextThing PocketCHIPs with current Debian"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+dependencies = ["numpy", "tqdm"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-xdist", "pytest-cov", "black", "pylint"]
+
+[project.scripts]
+pocketrechip = "pocketrechip.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["pocketrechip"]
+
+[tool.pylint.main]
+py-version = "3.11"
+
+[tool.pylint."messages control"]
+disable = ["too-many-instance-attributes", "too-many-locals", "too-few-public-methods"]

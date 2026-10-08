@@ -34,7 +34,7 @@ FLAGS=0x44000000 NFC=0x44100000 PAGES=0x45400000 WIN=0x2400000
 	echo "cp.l 0x1c03000 $NFC 0x40"
 	echo "mw.l $(printf 0x%x $((FLAGS + 0xffc))) 0x45464f44"
 	echo "setenv dfu_alt_info 'probe ram $FLAGS $WIN'"
-	echo "dfu 0 ram 0"
+	echo "dfu 0 ram 0; dfu 0 ram 0; dfu 0 ram 0; dfu 0 ram 0"
 	echo "reset"
 } >"$out/probe.cmd"
 "$ub/tools/mkimage" -A arm -O linux -T script -C none -n fel-probe \
@@ -46,7 +46,7 @@ fel="docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -v $rdir:/w -w /w
 ssh "$host" "$fel sunxi-fel -p uboot u-boot-sunxi-with-spl.bin write 0x43100000 probe.scr'"
 echo "waiting for DFU"
 ssh "$host" "for i in \$(seq 180); do lsusb -d 1f3a:1010 >/dev/null && exit 0; sleep 1; done; exit 1"
-ssh "$host" "$fel dfu-util -d 1f3a:1010 -a probe -U dram.bin -e'"
+ssh "$host" "$fel dfu-util -d 1f3a:1010 -a probe -U dram.bin'"
 scp -q "$host:$rdir/dram.bin" "$out/dram.bin"
 ssh "$host" rm -rf "$rdir"
 ls -l "$out/dram.bin"
