@@ -21,7 +21,8 @@ RUN for p in sunxi-Add-support-for-slc-emulation-on-mlc-NAND \
   && make -s ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- CHIP_defconfig \
   && make -s -j"$(nproc)" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
   && ! grep -q "^CONFIG_SYS_NAND_USE_FLASH_BBT=y" .config \
-  && grep -q "^CONFIG_ENV_IS_NOWHERE=y" .config
+  && grep -q "^CONFIG_ENV_IS_NOWHERE=y" .config \
+  && for c in HUSH_PARSER CMD_ITEST CMD_MTDPARTS CMD_DFU DFU_RAM; do grep -q "^CONFIG_$c=y" .config || exit 1; done
 
 FROM debian:trixie AS tools
 RUN apt-get update \

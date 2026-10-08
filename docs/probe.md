@@ -1,39 +1,112 @@
 # FEL NAND probe
 
-A read-only survey of a CHIP/PocketCHIP NAND, run from FEL without touching flash.
+A read-only survey and full backup of a CHIP/PocketCHIP NAND, run from FEL without
+writing flash.
 It identifies the chip size, what occupies each eraseblock (legacy NTC SPL/U-Boot/env,
 UBI with its `image_seq` and erase counters, erased or unreadable blocks) and recovers
 any old U-Boot environment.
 
-## Procedure
+## U-Boot agent
 
-1. `tools/fel-probe/build-uboot.sh` builds `cache/fel-probe/u-boot-sunxi-with-spl.bin`
-   (or use `/opt/pocketrechip/u-boot-sunxi-with-spl.bin` from the Docker image).
-2. Put the board in FEL (FEL pin grounded) on USB to a host with Docker.
-3. `tools/fel-probe/probe.sh <ssh-host>`:
-   - writes the probe script (`pocketrechip probe-script` produces identical text) and wraps it with `mkimage`;
-   - `sunxi-fel -p uboot u-boot-sunxi-with-spl.bin write 0x43100000 probe.scr`;
-     U-Boot's `bootcmd_fel` sources the script;
-   - the script fills the DRAM window, then serves it as DFU alt `probe`;
-     the host runs `dfu-util -a probe -U dram.bin`, saved as `cache/fel-probe/dram.bin`.
-4. `pocketrechip analyze cache/fel-probe/dram.bin [--json]` decodes the window.
-   Exit status is non-zero if the script did not finish.
+The probe and the backup run on the same FEL-booted U-Boot "agent"
+(`src/pocketrechip/fel_agent.py`). The Docker image builds that U-Boot
+(`x-chip-uboot` `0e17d16` on v2022.01) into `/opt/pocketrechip/u-boot-sunxi-with-spl.bin`;
+`docker run --rm pocketrechip cat /opt/pocketrechip/u-boot-sunxi-with-spl.bin > u-boot.bin`
+extracts it for use outside the container (`--uboot`).
+
+- `sunxi-fel -p uboot u-boot-sunxi-with-spl.bin write 0x43100000 agent.scr`;
+  U-Boot's `bootcmd_fel` sources the agent script:
+
+  ```
+  setenv dfu_alt_info 'cmd ram 0x43200000 0x100000'
+  while itest 1 == 1; do dfu 0 ram 0; source 0x43200000; mw.l 0x43200000 0 4; done
+  reset
+  ```
+
+- The host downloads a `mkimage` script into DFU alt `cmd` (`dfu-util -a cmd -D x.scr`)
+  and ends the session with a bare DFU_DETACH (`dfu-util -a cmd -e`). `dfu 0 ram 0`
+  returns, the loop sources the script, then clears its image header so a session
+  without a download sources nothing.
+- Each script ends by setting `dfu_alt_info` to `cmd` plus the DRAM areas it filled,
+  named with a per-run sequence number (`probe1`, `stat3`, `raw3`, ...). The host polls
+  `dfu-util -l` until that name appears, so a stale enumeration of the previous session
+  is never mistaken for the new one, then uploads each area with `dfu-util -U -Z size`.
+- `dfu-util -R` is never used: in `run_usb_dnl_gadget` (common/dfu.c) a USB reset after
+  a detach makes U-Boot reset the board instead of returning to the loop.
+- The last script is `reset`; with the FEL pin still grounded the board comes back in FEL
+  (`1f3a:efe8`). DFU is `1f3a:1010`.
+
+| Address | Use |
+|---|---|
+| `0x43100000` | agent boot script (FEL write) |
+| `0x43200000` | `cmd` entity, 1 MiB |
+| `0x43300000` | per-script status (`STAT_ADDR`) |
+| `0x44000000`.. | probe window / backup data, below `0x58000000` |
 
 ## Safety properties
 
-- U-Boot is `x-chip-uboot` (`0e17d16`) on v2022.01 with `CONFIG_SYS_NAND_USE_FLASH_BBT`
-  disabled: bad blocks are judged from OOB markers only and no bad block table is ever
-  scanned for or written to flash.
+- `CONFIG_SYS_NAND_USE_FLASH_BBT` is disabled: bad blocks are judged from OOB markers
+  only and no bad block table is ever scanned for or written to flash.
 - `CONFIG_ENV_IS_NOWHERE=y`: the environment is never loaded from or saved to NAND.
-- The script uses only `nand read`, `nand read.raw`, `mw`, `cp.l` into DRAM, `setenv`,
-  `dfu ... ram` and `reset`; no erase, write, `saveenv` or `ubi` command
-  (asserted by `tests/test_probe_script.py`).
-- The script never returns to `bootcmd`: it ends in DFU sessions followed by `reset`,
-  so it cannot fall through to `ubi part rootfs` (which would attach and possibly
-  rewrite UBI metadata). With the FEL pin still grounded the board resets back into FEL.
+- The agent loop never falls through to `bootcmd`, so it cannot reach `ubi part rootfs`
+  (which would attach and possibly rewrite UBI metadata).
+- Probe and backup scripts use only `nand read`, `nand read.raw`, `mw`, `cp.l`, `itest`
+  and `setenv`; no erase, write, `saveenv`, `ubi`, `dfu` or `reset`
+  (asserted by `tests/test_probe_script.py` and `tests/test_backup.py`).
+- The Docker build asserts the U-Boot config (no flash BBT, env nowhere, hush, `itest`,
+  `mtdparts`, DFU RAM).
 - Reads past the end of the chip fail cleanly; their failure is the size probe.
 
-## DRAM window
+## Probe
+
+1. Put the board in FEL (FEL pin grounded) on USB.
+2. `pocketrechip probe --out DIR [--uboot PATH] [--json]` boots the agent, runs the probe
+   script (`pocketrechip probe-script` prints it), uploads the window as `DIR/dram.bin`,
+   resets the board and prints the analysis. `pocketrechip analyze DIR/dram.bin` re-decodes it.
+   Exit status is non-zero if the script did not finish.
+3. From a workstation: `tools/fel-probe/remote.sh HOST /srv/chip probe` copies the
+   `pocketrechip` image to `HOST` if needed and runs the command there
+   (`docker run --privileged -v /dev/bus/usb:/dev/bus/usb -v /srv/chip:/out`).
+
+## Backup
+
+`pocketrechip backup --out DIR [--uboot PATH] [--chunk-ebs 16] [--oob N] [--eraseblocks N] [--verify]`
+
+- Reads the NAND ID byte from the controller registers; geometry comes from
+  `NAND_CHIPS` (`--oob`/`--eraseblocks` override, and are required for an unknown ID).
+- Per chunk of eraseblocks, one script clears its DRAM areas and, per eraseblock *e*:
+  - `nand read.raw RAW+i*raw_eb e*0x400000 0x100`: 256 pages, each data then OOB
+    (`raw_eb = 256*(0x4000+oob)`), status bit 0;
+  - `setenv mtdparts nand0:0x400000@<e*0x400000>(blk)` and
+    `nand read ECC+i*0x400000 blk 0x400000`: ECC-corrected, de-randomised data, status bit 1.
+    The one-eraseblock partition limits `nand_read_skip_bad`, so a bad block fails the
+    read instead of silently returning the next good block's data.
+- `RAW = 0x44000000`, `ECC` is the next 16 MiB boundary after the raw area; chunks whose
+  areas would reach `0x58000000` are rejected (at most 37 Toshiba / 36 Hynix eraseblocks).
+- The host appends the raw and ECC areas to `DIR/nand.raw` and `DIR/nand.ecc` and rewrites
+  `DIR/manifest.json` after every chunk; a rerun with the same `--out` resumes at the next
+  eraseblock (the manifest must match chip geometry and U-Boot sha256). Failed slots are zero.
+- `manifest.json`: chip, `nfc_id`, `page`, `pages`, `oob`, `eraseblocks`, `raw_eraseblock`,
+  `chunk_eraseblocks`, `uboot_sha256`, per-eraseblock `status` and `ecc_sha256`,
+  `nand_raw_sha256`, `nand_ecc_sha256`, `started`/`updated`/`finished`, `complete`.
+- Status bits: 1 raw read ok, 2 ECC read ok (0 for bad or uncorrectable blocks),
+  with `--verify` 4 ECC re-read identical, 8 ECC re-read differs. Raw MLC reads may
+  legitimately differ between reads, so only ECC data is compared.
+
+### Restore
+
+`nand.raw` holds, per eraseblock, 256 × (`0x4000` + oob) bytes exactly as `nand read.raw`
+returned them (randomised data and OOB including ECC bytes), so writing it back with
+`nand write.raw` reproduces the page contents:
+
+```
+nand erase <e*0x400000> 0x400000
+nand write.raw <addr> <e*0x400000> 0x100     # addr holds bytes [e*raw_eb, (e+1)*raw_eb) of nand.raw
+```
+
+Leave eraseblocks that the target's `nand bad` lists untouched; `nand erase` skips them.
+
+## Probe DRAM window
 
 Base `0x44000000`, length `0x2400000`. Offsets are relative to the base;
 the single source of truth is `src/pocketrechip/probe_layout.py`.

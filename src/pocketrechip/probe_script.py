@@ -1,6 +1,9 @@
-"""Generate the read-only U-Boot NAND probe script from the window layout."""
+"""Generate the read-only U-Boot NAND probe script and capture its window."""
+
+from pathlib import Path
 
 from . import probe_layout as L
+from .fel_agent import Agent, script_text, serve
 
 
 def _guarded(cmd: str, flag_off: int) -> str:
@@ -8,8 +11,8 @@ def _guarded(cmd: str, flag_off: int) -> str:
     return f"if {cmd}; then mw.b {flag} {L.STATUS_OK}; else mw.b {flag} {L.STATUS_FAILED}; fi"
 
 
-def commands(dfu_sessions: int = L.DFU_SESSIONS) -> list[str]:
-    """U-Boot commands: NAND reads into the window, then serve it over DFU and reset."""
+def commands(seq: int = 1) -> list[str]:
+    """Agent script: NAND reads into the window, then expose it as alt probe<seq>."""
     base = L.WINDOW_BASE
     out = [f"mw.b {hex(base)} 0 {hex(L.CLEAR_LEN)}"]
     for i, r in enumerate(L.REGIONS):
@@ -29,13 +32,18 @@ def commands(dfu_sessions: int = L.DFU_SESSIONS) -> list[str]:
     out += [
         f"cp.l {hex(L.NFC_BASE)} {hex(base + L.NFC_OFF)} {hex(L.NFC_LEN // 4)}",
         f"mw.l {hex(base + L.DONE_OFF)} {hex(L.DONE_MAGIC)}",
-        f"setenv dfu_alt_info 'probe ram {hex(base)} {hex(L.WINDOW_LEN)}'",
-        "; ".join(["dfu 0 ram 0"] * dfu_sessions),
-        "reset",
+        serve([(f"probe{seq}", base, L.WINDOW_LEN)]),
     ]
     return out
 
 
-def script(dfu_sessions: int = L.DFU_SESSIONS) -> str:
-    """Probe script text as written to probe.cmd."""
-    return "".join(c + "\n" for c in commands(dfu_sessions))
+def script(seq: int = 1) -> str:
+    """Probe script text."""
+    return script_text(commands(seq))
+
+
+def capture(agent: Agent, out: Path) -> Path:
+    """Run the probe on a booted agent and upload its window to out/dram.bin."""
+    seq = agent.next_seq()
+    agent.run(f"probe{seq}", commands(seq), f"probe{seq}")
+    return agent.dfu.upload(f"probe{seq}", Path(out) / "dram.bin", L.WINDOW_LEN)
