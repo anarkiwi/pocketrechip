@@ -1,0 +1,9 @@
+/cache
+.claude/worktrees/
+.venv/
+__pycache__/
+*.egg-info/
+.coverage
+.pytest_cache/
+build/
+core.*
