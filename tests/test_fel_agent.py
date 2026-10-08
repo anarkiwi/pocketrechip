@@ -30,7 +30,7 @@ def test_boot_script_loops_forever_over_cmd_entity():
         "setenv dfu_alt_info 'cmd ram 0x43200000 0x100000'",
         "while itest 1 == 1; do dfu 0 ram 0; source 0x43200000; "
         "mw.l 0x43200000 0 4; done",
-        "reset",
+        *A.reset_commands(),
     ]
 
 
@@ -142,7 +142,7 @@ def test_session_runs_and_resets(tmp_path):
             f"t{seq}",
         )
         assert agent.dfu.upload(f"t{seq}", tmp_path / "t.bin", 2).read_bytes() == b"ZZ"
-    assert dev.state == "fel" and dev.scripts[-1] == "reset\n"
+    assert dev.state == "fel" and dev.scripts[-1] == A.script_text(A.reset_commands())
 
 
 def test_session_resets_after_error_and_reraises(tmp_path):
@@ -161,3 +161,28 @@ def test_session_error_survives_failed_reset(tmp_path):
         with agent.session(tmp_path / "u-boot.bin"):
             raise RuntimeError("boom")
     assert dev.state == "dfu"
+
+
+def test_reset_rewrites_watchdog_mode_forever():
+    assert A.reset_commands() == [
+        "mw.l 0x1c20c94 3",
+        "mw.l 0x1c20c90 0x14af",
+        "while itest 1 == 1; do mw.l 0x1c20c94 3; done",
+    ]
+    assert A.boot_commands()[-3:] == A.reset_commands()
+
+
+@pytest.mark.parametrize(
+    "lines,resets",
+    [
+        (["mw.l 0x1c20c94 3", "mw.l 0x1c20c90 0x14af"], True),
+        (["mw.l 0x1c20c90 0x14af"], False),
+        (["mw.l 0x1c20c94 3", "mw.l 0x1c20c90 0x1"], False),
+    ],
+)
+def test_fake_resets_only_on_armed_watchdog_restart(tmp_path, lines, resets):
+    dev = FakeDevice(nand(), stale=0)
+    agent = A.Agent(tmp_path, dev, poll=0)
+    agent.boot(tmp_path / "u-boot.bin")
+    agent.run("w", lines, None)
+    assert dev.state == ("fel" if resets else "dfu")

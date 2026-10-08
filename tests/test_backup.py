@@ -20,6 +20,7 @@ SMALL = B.Geometry(page=0x40, pages=4, oob=0x10, eraseblocks=10)
 TOSHIBA = B.Geometry(L.PAGE, 256, 1280, 1024)
 HYNIX = B.Geometry(L.PAGE, 256, 1664, 2048)
 OK = B.RAW_OK | B.ECC_OK
+TOSHIBA_NAME = "Toshiba TC58TEG5DCLTA00"
 
 
 def small_nand(**kw):
@@ -73,13 +74,30 @@ def test_chunk_never_writes_nand():
     assert re.findall(r"nand (\S+)", text) == ["read.raw", "read"] * 16
 
 
-def test_geometry_from_nfc_id():
-    assert B.geometry(0x40) == TOSHIBA
-    assert B.geometry(0x60) == HYNIX
-    assert B.geometry(0x40, oob=1664, eraseblocks=4) == B.Geometry(L.PAGE, 256, 1664, 4)
-    with pytest.raises(ValueError, match="0x13"):
-        B.geometry(0x13, oob=1280)
-    assert B.geometry(0x13, 1280, 1024) == TOSHIBA
+@pytest.mark.parametrize("nfc_id", [0, 0x40])
+def test_geometry_toshiba(nfc_id):
+    assert B.geometry(4 << 30, nfc_id) == (TOSHIBA_NAME, TOSHIBA)
+    assert B.geometry(4 << 30, nfc_id, oob=1664, eraseblocks=4) == (
+        TOSHIBA_NAME,
+        B.Geometry(L.PAGE, 256, 1664, 4),
+    )
+
+
+def test_geometry_hynix_and_unknown():
+    assert B.geometry(8 << 30, 0x60) == ("Hynix H27UCG8T2ETR", HYNIX)
+    with pytest.raises(ValueError, match="size None, ID byte 0x13"):
+        B.geometry(None, 0x13, oob=1280)
+    assert B.geometry(None, 0x13, 1280, 1024) == ("unknown", TOSHIBA)
+
+
+@pytest.mark.parametrize(
+    "size,nfc_id,other", [(8 << 30, 0x40, "Toshiba"), (4 << 30, 0x13, "an unknown")]
+)
+def test_geometry_id_mismatch_names_both(size, nfc_id, other):
+    with pytest.raises(
+        ValueError, match=f"{size >> 30} GiB.*{nfc_id:#04x} gives {other}"
+    ):
+        B.geometry(size, nfc_id, 1280, 4)
 
 
 def run_backup(tmp_path, dev, chunk=4, verify=False, out=None):
@@ -89,7 +107,7 @@ def run_backup(tmp_path, dev, chunk=4, verify=False, out=None):
     prior = B.load_manifest(out)
     with agent.session(tmp_path / "u-boot.bin"):
         job = B.Backup(agent, out, SMALL, chunk)
-        return job.run(job.start(0x40, "ab" * 32, prior), verify), out
+        return job.run(job.start(TOSHIBA_NAME, 0x40, "ab" * 32, prior), verify), out
 
 
 def expected(nand, n):
@@ -125,7 +143,10 @@ def test_backup_flow(tmp_path):
         "0x400",
         "0x800",
     ]
-    assert dev.scripts[-1] == "reset\n" and dev.state == "fel"
+    assert (
+        dev.scripts[-1] == fel_agent.script_text(fel_agent.reset_commands())
+        and dev.state == "fel"
+    )
     assert not list((out / B.WORK_DIR).glob("*.bin"))
 
 
@@ -164,17 +185,17 @@ def test_resume_refuses_mismatch_and_orphans(tmp_path):
     out.mkdir()
     agent = fel_agent.Agent(out / B.WORK_DIR, FakeDevice(small_nand()), poll=0)
     job = B.Backup(agent, out, SMALL, 4)
-    m = job.start(0x40, "00", None)
+    m = job.start(TOSHIBA_NAME, 0x40, "00", None)
     m["oob"] = 0x20
     with pytest.raises(ValueError, match=r"\['oob', 'uboot_sha256'\]"):
-        job.start(0x40, "11", m)
+        job.start(TOSHIBA_NAME, 0x40, "11", m)
     (out / B.RAW_FILE).write_bytes(b"x")
     with pytest.raises(FileExistsError):
-        job.start(0x40, "00", None)
+        job.start(TOSHIBA_NAME, 0x40, "00", None)
     m["oob"] = 0x10
     m["next_eraseblock"] = 1
     with pytest.raises(ValueError, match="shorter"):
-        job.run(job.start(0x40, "00", m))
+        job.run(job.start(TOSHIBA_NAME, 0x40, "00", m))
 
 
 def test_verify_marks_stable_and_unstable_blocks(tmp_path):
@@ -203,3 +224,28 @@ def test_cli_backup_real_geometry(tmp_path, monkeypatch, capsys):
     calls = len(dev.calls)
     assert main(argv) == 0
     assert len(dev.calls) == calls
+
+
+def test_backup_rejects_id_mismatch_and_resets(tmp_path):
+    dev = FakeDevice(FakeNand(HYNIX), nfc_id=0x40, stale=0)
+    uboot = tmp_path / "u-boot.bin"
+    uboot.write_bytes(b"uboot")
+    agent = fel_agent.Agent(tmp_path / "w", dev, poll=0)
+    with pytest.raises(ValueError, match="Hynix.*0x40 gives Toshiba"):
+        B.backup(agent, tmp_path / "out", uboot)
+    assert dev.state == "fel" and not (tmp_path / "out" / B.MANIFEST).exists()
+
+
+def test_backup_logs_each_chunk(tmp_path, caplog):
+    caplog.set_level("INFO", "pocketrechip.backup")
+    nand = small_nand(bad={5})
+    run_backup(tmp_path, FakeDevice(nand), chunk=4)
+    lines = [r.getMessage() for r in caplog.records]
+    assert [l.split(":")[0] for l in lines] == [
+        "eraseblocks 0-3/10",
+        "eraseblocks 4-7/10",
+        "eraseblocks 8-9/10",
+    ]
+    assert "raw=4 ecc=3 verified=0 mismatch=0;" in lines[1]
+    assert re.search(r" [\d.]+ MB/s, ETA \d\d:\d\d$", lines[0])
+    assert lines[-1].endswith("ETA 00:00")

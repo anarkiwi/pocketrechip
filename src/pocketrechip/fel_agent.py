@@ -21,6 +21,10 @@ CMD_ALT = "cmd"
 
 DFU_ID = "1f3a:1010"
 
+WDT_CTRL, WDT_MODE = 0x01C20C90, 0x01C20C94
+WDT_MODE_RESET = 0x3
+WDT_CTRL_RESTART = (0xA57 << 1) | 1
+
 Runner = Callable[[Sequence[str]], str]
 
 FOUND_RE = re.compile(rf'^Found DFU: \[{DFU_ID}\] .*\balt=(\d+), name="([^"]*)"', re.M)
@@ -42,13 +46,27 @@ def serve(entities: Iterable[tuple[str, int, int]]) -> str:
     return f"setenv dfu_alt_info '{alt_info(entities)}'"
 
 
+def reset_commands() -> list[str]:
+    """Watchdog reset that keeps rewriting WDT_MODE, as the sun5i reset_cpu() does.
+
+    WDT_MODE = RESET_EN | EN with the 0.5 s interval, then WDT_CTRL = KEY | RESTART.
+    The sysreset path (sunxi_wdt_expire_now) arms the watchdog once, which can hang sun5i.
+    """
+    mode = f"mw.l {WDT_MODE:#x} {WDT_MODE_RESET}"
+    return [
+        mode,
+        f"mw.l {WDT_CTRL:#x} {WDT_CTRL_RESTART:#x}",
+        f"while itest 1 == 1; do {mode}; done",
+    ]
+
+
 def boot_commands() -> list[str]:
     """FEL boot script: the agent loop, never falling through to bootcmd."""
     return [
         serve(()),
         f"while itest 1 == 1; do dfu 0 ram 0; source {CMD_ADDR:#x}; "
         f"mw.l {CMD_ADDR:#x} 0 4; done",
-        "reset",
+        *reset_commands(),
     ]
 
 
@@ -164,7 +182,7 @@ class Agent:
 
     def reset(self) -> None:
         """Reset the board (back to FEL while the FEL pin is grounded)."""
-        self.run("reset", ["reset"], None)
+        self.run("reset", reset_commands(), None)
 
     @contextmanager
     def session(self, uboot: Path) -> Iterator["Agent"]:

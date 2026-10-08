@@ -9,9 +9,10 @@ from fakedev import FakeDevice, FakeNand
 
 from pocketrechip import analyze, fel_agent
 from pocketrechip import probe_layout as L
-from pocketrechip.backup import geometry
+from pocketrechip.backup import Geometry, geometry
 from pocketrechip.cli import main
-from pocketrechip.probe_script import capture, commands, script
+from pocketrechip.fel_agent import STAT_ADDR
+from pocketrechip.probe_script import capture, commands, detect, detect_commands, script
 
 READ_RE = re.compile(
     r"if nand read(\.raw)? (0x[0-9a-f]+) (\w+) (\w+); "
@@ -74,7 +75,7 @@ def test_cli_prints_script(capsys):
 
 
 def chip():
-    return FakeNand(geometry(0x40))
+    return FakeNand(geometry(4 << 30, 0x40)[1])
 
 
 def test_capture_over_agent(tmp_path):
@@ -103,7 +104,7 @@ def test_capture_over_agent(tmp_path):
         ["-a", "cmd"],
         ["-a", "cmd"],
     ]
-    assert dev.scripts == [script(1), "reset\n"]
+    assert dev.scripts == [script(1), fel_agent.script_text(fel_agent.reset_commands())]
     assert dev.state == "fel"
 
 
@@ -114,3 +115,48 @@ def test_cli_probe(tmp_path, monkeypatch, capsys):
     assert main(["probe", "--out", str(out), "--uboot", "u.bin", "--json"]) == 0
     assert '"nand_size": 4294967296' in capsys.readouterr().out
     assert (out / "dram.bin").stat().st_size == L.WINDOW_LEN
+
+
+def test_detect_commands_exact():
+    assert detect_commands(4) == [
+        "mw.b 0x43300000 0 0x103",
+        "if nand read 0x45400000 0x0 0x4000; "
+        "then mw.b 0x43300100 1; else mw.b 0x43300100 2; fi",
+        "cp.l 0x1c03000 0x43300000 0x40",
+        "if nand read 0x45200000 0x100000000 0x4000; "
+        "then mw.b 0x43300101 1; else mw.b 0x43300101 2; fi",
+        "if nand read 0x45240000 0x200000000 0x4000; "
+        "then mw.b 0x43300102 1; else mw.b 0x43300102 2; fi",
+        "setenv dfu_alt_info 'cmd ram 0x43200000 0x100000;detect4 ram 0x43300000 0x103'",
+    ]
+
+
+@pytest.mark.parametrize(
+    "geom,nfc_id,size",
+    [
+        (Geometry(L.PAGE, 256, 1280, 1024), 0x40, 4 << 30),
+        (Geometry(L.PAGE, 256, 1664, 2048), 0x60, 8 << 30),
+        (Geometry(L.PAGE, 256, 1664, 2048), 0, 8 << 30),
+        (Geometry(L.PAGE, 256, 1280, 4096), 0x40, None),
+    ],
+)
+def test_detect_over_agent(tmp_path, geom, nfc_id, size):
+    dev = FakeDevice(FakeNand(geom), nfc_id=nfc_id, stale=1)
+    agent = fel_agent.Agent(tmp_path, dev, poll=0)
+    with agent.session(tmp_path / "u-boot.bin"):
+        assert detect(agent) == (size, nfc_id)
+
+
+def test_nfc_id_byte_needs_a_prior_nand_read(tmp_path):
+    dev = FakeDevice(chip(), stale=0)
+    agent = fel_agent.Agent(tmp_path, dev, poll=0)
+    with agent.session(tmp_path / "u-boot.bin"):
+        agent.run("early", detect_commands(1)[2:3] + [fel_agent.serve([])], None)
+        assert dev.mem.read(STAT_ADDR + L.NFC_ID_BYTE, 1) == b"\x00"
+        assert detect(agent) == (4 << 30, 0x40)
+
+
+def test_detect_never_writes_nand():
+    text = "\n".join(detect_commands(1))
+    assert re.findall(r"nand (\S+)", text) == ["read"] * 3
+    assert not re.search(r"\b(ubi|erase|write|saveenv|scrub|dfu |reset)\b", text)

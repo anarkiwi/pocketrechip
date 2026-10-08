@@ -20,7 +20,9 @@ extracts it for use outside the container (`--uboot`).
   ```
   setenv dfu_alt_info 'cmd ram 0x43200000 0x100000'
   while itest 1 == 1; do dfu 0 ram 0; source 0x43200000; mw.l 0x43200000 0 4; done
-  reset
+  mw.l 0x1c20c94 3
+  mw.l 0x1c20c90 0x14af
+  while itest 1 == 1; do mw.l 0x1c20c94 3; done
   ```
 
 - The host downloads a `mkimage` script into DFU alt `cmd` (`dfu-util -a cmd -D x.scr`)
@@ -33,8 +35,12 @@ extracts it for use outside the container (`--uboot`).
   is never mistaken for the new one, then uploads each area with `dfu-util -U -Z size`.
 - `dfu-util -R` is never used: in `run_usb_dnl_gadget` (common/dfu.c) a USB reset after
   a detach makes U-Boot reset the board instead of returning to the loop.
-- The last script is `reset`; with the FEL pin still grounded the board comes back in FEL
-  (`1f3a:efe8`). DFU is `1f3a:1010`.
+- The last script resets through the watchdog (`fel_agent.reset_commands`): `WDT_MODE`
+  (`0x01c20c94`) = RESET_EN|EN with the 0.5 s interval, `WDT_CTRL` (`0x01c20c90`) =
+  KEY|RESTART, then rewrite `WDT_MODE` forever. U-Boot's `reset` goes through sysreset
+  (`sunxi_wdt_expire_now`, which arms the watchdog once) and bypasses the sun5i `reset_cpu()`
+  loop that keeps rewriting `WDT_MODE` because sun5i sometimes gets stuck otherwise.
+  With the FEL pin still grounded the board comes back in FEL (`1f3a:efe8`). DFU is `1f3a:1010`.
 
 | Address | Use |
 |---|---|
@@ -50,8 +56,8 @@ extracts it for use outside the container (`--uboot`).
 - `CONFIG_ENV_IS_NOWHERE=y`: the environment is never loaded from or saved to NAND.
 - The agent loop never falls through to `bootcmd`, so it cannot reach `ubi part rootfs`
   (which would attach and possibly rewrite UBI metadata).
-- Probe and backup scripts use only `nand read`, `nand read.raw`, `mw`, `cp.l`, `itest`
-  and `setenv`; no erase, write, `saveenv`, `ubi`, `dfu` or `reset`
+- Probe, detection and backup scripts use only `nand read`, `nand read.raw`, `mw`, `cp.l`,
+  `itest` and `setenv`; no erase, write, `saveenv`, `ubi`, `dfu` or `reset`
   (asserted by `tests/test_probe_script.py` and `tests/test_backup.py`).
 - The Docker build asserts the U-Boot config (no flash BBT, env nowhere, hush, `itest`,
   `mtdparts`, DFU RAM).
@@ -72,8 +78,15 @@ extracts it for use outside the container (`--uboot`).
 
 `pocketrechip backup --out DIR [--uboot PATH] [--chunk-ebs 16] [--oob N] [--eraseblocks N] [--verify]`
 
-- Reads the NAND ID byte from the controller registers; geometry comes from
-  `NAND_CHIPS` (`--oob`/`--eraseblocks` override, and are required for an unknown ID).
+- A detection session (`probe_script.detect_commands`) first does a guarded `nand read`
+  of page 0 (any outcome; the controller only holds the ID byte after a NAND command),
+  copies the controller registers to `STAT_ADDR`, then does guarded one-page reads at
+  4 GiB and 8 GiB, serving registers and the three status bytes as `detect<seq>`.
+- The size probes decide the chip (`probe_layout.nand_size`, shared with the analyzer):
+  4 GiB read fails means a 4 GiB part, 4 GiB ok and 8 GiB failed an 8 GiB part.
+  A non-zero ID byte must agree (`probe_layout.identify`), otherwise the backup stops naming
+  both. Geometry comes from `NAND_CHIPS` (keyed by size); `--oob`/`--eraseblocks` override,
+  and are required when the size is inconclusive. Resuming requires the same chip name.
 - Per chunk of eraseblocks, one script clears its DRAM areas and, per eraseblock *e*:
   - `nand read.raw RAW+i*raw_eb e*0x400000 0x100`: 256 pages, each data then OOB
     (`raw_eb = 256*(0x4000+oob)`), status bit 0;
@@ -84,7 +97,8 @@ extracts it for use outside the container (`--uboot`).
 - `RAW = 0x44000000`, `ECC` is the next 16 MiB boundary after the raw area; chunks whose
   areas would reach `0x58000000` are rejected (at most 37 Toshiba / 36 Hynix eraseblocks).
 - The host appends the raw and ECC areas to `DIR/nand.raw` and `DIR/nand.ecc` and rewrites
-  `DIR/manifest.json` after every chunk; a rerun with the same `--out` resumes at the next
+  `DIR/manifest.json` after every chunk, logging one line per chunk (eraseblock range,
+  status bit counts, MB/s, ETA); a rerun with the same `--out` resumes at the next
   eraseblock (the manifest must match chip geometry and U-Boot sha256). Failed slots are zero.
 - `manifest.json`: chip, `nfc_id`, `page`, `pages`, `oob`, `eraseblocks`, `raw_eraseblock`,
   `chunk_eraseblocks`, `uboot_sha256`, per-eraseblock `status` and `ecc_sha256`,
@@ -132,7 +146,7 @@ NAND geometry: page `0x4000`, eraseblock `0x400000`, OOB 1664 (Hynix) / 1280 (To
 | `0x40` | Toshiba TC58TEG5DCLTA00 | 4 GiB |
 | `0x60` | Hynix H27UCG8T2ETR | 8 GiB |
 
-The ID byte is only meaningful if the controller last issued READ ID; the size probe is authoritative.
+The ID byte reads `0x00` until the controller has run a NAND command; the size probe is authoritative.
 
 ## Analysis
 
@@ -144,3 +158,9 @@ The ID byte is only meaningful if the controller last issued READ ID; the size p
   from `0x2000` to one eraseblock, in single and redundant (flag byte) layouts; variables are
   reported even when no CRC matches. The legacy NTC environment occupies a full eraseblock.
 - Eraseblocks 0–1 hold the BROM-format SPL, which the ECC read path does not decode, so they are expected to read as failed.
+
+## Progress
+
+On a TTY, progress is tqdm bars on stderr. When stderr is not a TTY (`docker run -d`,
+`docker logs`) the bars print one line every 30 s and on completion, and INFO log lines
+(one per backup chunk) go to stderr as well.

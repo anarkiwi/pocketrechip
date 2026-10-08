@@ -6,9 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
-from tqdm import tqdm
-
 from . import probe_layout as L
+from .progress import progress_bar
 
 UBI_EC_MAGIC = b"UBI#"
 UBI_EC_DTYPE = np.dtype(
@@ -99,17 +98,6 @@ def _status(buf: np.ndarray, off: int) -> str:
     return L.STATUS_NAMES.get(int(buf[off]), f"unknown-{int(buf[off])}")
 
 
-def nand_size(statuses: dict[str, str]) -> int | None:
-    """Smallest size probe offset that failed after all lower probes succeeded."""
-    for r in L.SIZE_PROBES:
-        s = statuses[r.name]
-        if s == "failed":
-            return r.nand_off
-        if s != "ok":
-            return None
-    return None
-
-
 def classify_eraseblocks(buf: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Per-eraseblock class codes and first-page data (N_ERASEBLOCKS x PAGE)."""
     n, page = L.N_ERASEBLOCKS, L.PAGE
@@ -135,8 +123,8 @@ def ubi_summary(headers: np.ndarray) -> UbiSummary:
     crc = np.fromiter(
         (
             zlib.crc32(h[:UBI_CRC_LEN].tobytes()) ^ 0xFFFFFFFF
-            for h in tqdm(
-                headers, desc="ubi crc", unit="hdr", leave=False, disable=None
+            for h in progress_bar(
+                iterable=headers, desc="ubi crc", unit="hdr", leave=False
             )
         ),
         np.uint32,
@@ -223,16 +211,17 @@ def analyze(buf: np.ndarray | bytes) -> ProbeSummary:
     if len(buf) < L.WINDOW_LEN:
         raise ValueError(f"window is {len(buf):#x} bytes, expected {L.WINDOW_LEN:#x}")
     statuses = {r.name: _status(buf, L.STATUS_OFF + i) for i, r in enumerate(L.REGIONS)}
+    size = L.nand_size([buf[L.STATUS_OFF + L.REGIONS.index(r)] for r in L.SIZE_PROBES])
     nfc_id = int(buf[L.NFC_OFF + L.NFC_ID_BYTE])
-    chip = L.NAND_CHIPS.get(nfc_id)
+    chip = L.NAND_CHIPS.get(size) or L.CHIP_BY_ID.get(nfc_id)
     cls, pages = classify_eraseblocks(buf)
     done = int.from_bytes(buf[L.DONE_OFF : L.DONE_OFF + 4].tobytes(), "little")
     return ProbeSummary(
         finished=done == L.DONE_MAGIC,
         statuses=statuses,
-        nand_size=nand_size(statuses),
+        nand_size=size,
         nfc_id=nfc_id,
-        chip=chip[0] if chip else None,
+        chip=chip.name if chip else None,
         block_counts=dict(
             zip(EB_CLASSES, np.bincount(cls, minlength=len(EB_CLASSES)).tolist())
         ),

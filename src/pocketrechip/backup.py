@@ -6,8 +6,10 @@ ECC reads go through a one-eraseblock mtd partition so a bad block fails the rea
 
 import hashlib
 import json
+import logging
 import os
 import shutil
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +19,10 @@ from tqdm import tqdm
 
 from . import probe_layout as L
 from .fel_agent import STAT_ADDR, Agent, serve
+from .probe_script import detect
+from .progress import progress_bar
+
+log = logging.getLogger(__name__)
 
 RAW_ADDR = 0x44000000
 DRAM_LIMIT = 0x58000000
@@ -69,17 +75,21 @@ class Geometry:
 
 
 def geometry(
-    nfc_id: int, oob: int | None = None, eraseblocks: int | None = None
-) -> Geometry:
-    """Geometry from the NFC ID byte, with explicit overrides."""
-    chip = L.NAND_CHIPS.get(nfc_id)
-    oob = oob or (chip and chip[2])
-    eraseblocks = eraseblocks or (chip and chip[1] // L.ERASEBLOCK)
+    size: int | None,
+    nfc_id: int,
+    oob: int | None = None,
+    eraseblocks: int | None = None,
+) -> tuple[str, Geometry]:
+    """Chip name and geometry from the size probes and ID byte, with overrides."""
+    chip = L.identify(size, nfc_id)
+    oob = oob or (chip and chip.oob)
+    eraseblocks = eraseblocks or (chip and chip.eraseblocks)
     if not (oob and eraseblocks):
         raise ValueError(
-            f"unknown NAND ID byte {nfc_id:#04x}: give oob and eraseblocks"
+            f"unknown NAND (size {size}, ID byte {nfc_id:#04x}): give oob and eraseblocks"
         )
-    return Geometry(L.PAGE, L.ERASEBLOCK // L.PAGE, oob, eraseblocks)
+    name = chip.name if chip else "unknown"
+    return name, Geometry(L.PAGE, L.ERASEBLOCK // L.PAGE, oob, eraseblocks)
 
 
 def chunk_commands(
@@ -112,23 +122,6 @@ def chunk_commands(
     return out + [serve(ents)]
 
 
-def read_nfc_id(agent: Agent) -> int:
-    """NAND ID byte from the controller registers."""
-    seq = agent.next_seq()
-    alt = f"nfc{seq}"
-    agent.run(
-        alt,
-        [
-            f"cp.l {L.NFC_BASE:#x} {STAT_ADDR:#x} {L.NFC_LEN // 4:#x}",
-            serve([(alt, STAT_ADDR, L.NFC_LEN)]),
-        ],
-        alt,
-    )
-    return agent.dfu.upload(alt, agent.workdir / "nfc.bin", L.NFC_LEN).read_bytes()[
-        L.NFC_ID_BYTE
-    ]
-
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -138,14 +131,13 @@ def sha256_file(path: Path, desc: str | None = None) -> str:
     h = hashlib.sha256()
     with (
         open(path, "rb") as f,
-        tqdm(
+        progress_bar(
             total=path.stat().st_size,
             unit="B",
             unit_scale=True,
             unit_divisor=1024,
             desc=desc or path.name,
             leave=False,
-            disable=None,
         ) as progress,
     ):
         while block := f.read(HASH_BLOCK):
@@ -184,12 +176,14 @@ class Backup:
         geom.check(chunk)
         self.agent, self.out, self.geom, self.chunk = agent, Path(out), geom, chunk
 
-    def start(self, nfc_id: int, uboot_sha256: str, prior: dict | None) -> dict:
+    def start(
+        self, chip: str, nfc_id: int, uboot_sha256: str, prior: dict | None
+    ) -> dict:
         """New manifest, or prior one if it describes the same device and U-Boot."""
         g = self.geom
         manifest = {
             "format": FORMAT,
-            "chip": (L.NAND_CHIPS.get(nfc_id) or ("unknown",))[0],
+            "chip": chip,
             "nfc_id": nfc_id,
             **asdict(g),
             "eraseblock": g.eraseblock,
@@ -208,7 +202,7 @@ class Backup:
             if any((self.out / f).exists() for f in (RAW_FILE, ECC_FILE)):
                 raise FileExistsError(f"{self.out} has NAND images but no {MANIFEST}")
             return manifest
-        keys = ("format", "nfc_id", *asdict(g), "uboot_sha256")
+        keys = ("format", "chip", *asdict(g), "uboot_sha256")
         diff = [k for k in keys if prior.get(k) != manifest[k]]
         if diff:
             raise ValueError(
@@ -246,14 +240,14 @@ class Backup:
                 f.truncate(start * size)
         status = manifest["status"]
         hashes = manifest["ecc_sha256"]
-        with tqdm(
+        t0 = time.monotonic()
+        with progress_bar(
             total=g.eraseblocks * per_eb,
             initial=start * per_eb,
             unit="B",
             unit_scale=True,
             unit_divisor=1024,
             desc="backup",
-            disable=None,
         ) as progress:
             for e0 in range(start, g.eraseblocks, self.chunk):
                 n = min(self.chunk, g.eraseblocks - e0)
@@ -272,6 +266,18 @@ class Backup:
                 manifest["next_eraseblock"] = e0 + n
                 write_manifest(out, manifest)
                 progress.update(n * per_eb)
+                done = (e0 + n - start) * per_eb
+                rate = done / max(time.monotonic() - t0, 1e-9)
+                eta = (g.eraseblocks - e0 - n) * per_eb / rate
+                log.info(
+                    "eraseblocks %d-%d/%d: %s; %.2f MB/s, ETA %s",
+                    e0,
+                    e0 + n - 1,
+                    g.eraseblocks,
+                    _counts(stat),
+                    rate / 1e6,
+                    tqdm.format_interval(eta),
+                )
         manifest["nand_raw_sha256"] = sha256_file(paths["raw"])
         manifest["nand_ecc_sha256"] = sha256_file(paths["ecc"])
         manifest["complete"] = True
@@ -291,7 +297,7 @@ class Backup:
 
 @dataclass(frozen=True)
 class Options:
-    """Backup options; oob and eraseblocks default from the NAND ID byte."""
+    """Backup options; oob and eraseblocks default from the detected chip."""
 
     chunk: int = 16
     oob: int | None = None
@@ -309,18 +315,23 @@ def backup(agent: Agent, out: Path, uboot: Path, opts: Options = Options()) -> d
     with open(uboot, "rb") as f:
         uboot_sha = hashlib.file_digest(f, "sha256").hexdigest()
     with agent.session(uboot):
-        nfc_id = read_nfc_id(agent)
-        geom = geometry(nfc_id, opts.oob, opts.eraseblocks)
+        size, nfc_id = detect(agent)
+        chip, geom = geometry(size, nfc_id, opts.oob, opts.eraseblocks)
+        log.info("%s, NAND ID byte %#04x: %s", chip, nfc_id, geom)
         job = Backup(agent, out, geom, opts.chunk)
-        return job.run(job.start(nfc_id, uboot_sha, prior), opts.verify)
+        return job.run(job.start(chip, nfc_id, uboot_sha, prior), opts.verify)
+
+
+def _counts(status) -> str:
+    """Eraseblocks with each status bit set."""
+    st = np.asarray(status, np.uint8)
+    return " ".join(f"{k}={int(((st & b) != 0).sum())}" for k, b in STATUS_BITS.items())
 
 
 def summary(manifest: dict) -> str:
     """One-line status counts."""
-    st = np.asarray(manifest["status"], np.uint8)
-    counts = {k: int(((st & b) != 0).sum()) for k, b in STATUS_BITS.items()}
     done = "complete" if manifest["complete"] else "incomplete"
     return (
-        f"{manifest['chip']}: {len(st)}/{manifest['eraseblocks']} eraseblocks {done}; "
-        + " ".join(f"{k}={v}" for k, v in counts.items())
+        f"{manifest['chip']}: {len(manifest['status'])}/{manifest['eraseblocks']} "
+        f"eraseblocks {done}; {_counts(manifest['status'])}"
     )

@@ -18,7 +18,7 @@ MTDPARTS_RE = re.compile(r"nand0:(0x[0-9a-f]+)@(0x[0-9a-f]+)\(blk\)")
 
 
 class Reset(Exception):
-    """The script ran `reset`."""
+    """The script restarted the watchdog with reset enabled."""
 
 
 class Mem:
@@ -109,8 +109,9 @@ class FakeDevice:
 
     def __init__(self, nand: FakeNand, nfc_id: int = 0x40, stale: int = 2, fail=None):
         self.nand, self.stale, self.fail = nand, stale, fail
+        self.nfc_id = nfc_id
         self.mem = Mem()
-        self.mem.write(L.NFC_BASE + L.NFC_ID_BYTE, [nfc_id])
+        self.wdt_mode = 0
         self.env: dict[str, str] = {}
         self.alts: dict[str, tuple[int, int]] = {}
         self.shown: list[str] = []
@@ -224,7 +225,9 @@ class FakeDevice:
 
     def _cmd(self, cmd, *args) -> bool:
         h = [int(a, 16) if re.fullmatch(r"(0x)?[0-9a-f]+", a) else None for a in args]
-        if cmd in ("mw.b", "mw.l"):
+        if cmd == "mw.l" and h[0] in (A.WDT_MODE, A.WDT_CTRL):
+            self._wdt(h[0], h[1])
+        elif cmd in ("mw.b", "mw.l"):
             width = 1 if cmd == "mw.b" else 4
             count = h[2] if len(h) > 2 else 1
             self._store(h[0], h[1].to_bytes(width, "little") * count)
@@ -237,14 +240,21 @@ class FakeDevice:
             return self.mem.read(int(args[0][1:], 16), 1)[0] == h[2]
         elif cmd == "nand":
             return self._nand(args[0], h[1], h[2], args)
-        elif cmd == "reset":
-            raise Reset
         else:
             raise AssertionError(f"unexpected command {cmd}")
         return True
 
+    def _wdt(self, reg: int, value: int) -> None:
+        """Watchdog registers: KEY | RESTART with RESET_EN | EN armed resets the SoC."""
+        if reg == A.WDT_MODE:
+            self.wdt_mode = value
+        elif value == A.WDT_CTRL_RESTART and self.wdt_mode == A.WDT_MODE_RESET:
+            raise Reset
+
     def _nand(self, op, addr, off, args) -> bool:
+        """NAND command; the controller holds the ID byte once any NAND command ran."""
         nand = self.nand
+        self.mem.write(L.NFC_BASE + L.NFC_ID_BYTE, [self.nfc_id])
         if op == "read.raw":
             count = int(args[3], 16)
             if off + count * nand.page > nand.size:

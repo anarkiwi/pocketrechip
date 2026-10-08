@@ -1,5 +1,6 @@
 """DRAM window layout written by the FEL NAND probe script."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 SCRIPT_ADDR = 0x43100000
@@ -27,10 +28,30 @@ EB_PAGES_OFF = 0x1400000
 STATUS_NOT_RUN, STATUS_OK, STATUS_FAILED = 0, 1, 2
 STATUS_NAMES = {STATUS_NOT_RUN: "not-run", STATUS_OK: "ok", STATUS_FAILED: "failed"}
 
+
+@dataclass(frozen=True)
+class Chip:
+    """A supported NAND part."""
+
+    name: str
+    nfc_id: int
+    size: int
+    oob: int
+
+    @property
+    def eraseblocks(self) -> int:
+        """Eraseblocks on the chip."""
+        return self.size // ERASEBLOCK
+
+
 NAND_CHIPS = {
-    0x40: ("Toshiba TC58TEG5DCLTA00", 4 << 30, 1280),
-    0x60: ("Hynix H27UCG8T2ETR", 8 << 30, 1664),
+    c.size: c
+    for c in (
+        Chip("Toshiba TC58TEG5DCLTA00", 0x40, 4 << 30, 1280),
+        Chip("Hynix H27UCG8T2ETR", 0x60, 8 << 30, 1664),
+    )
 }
+CHIP_BY_ID = {c.nfc_id: c for c in NAND_CHIPS.values()}
 
 
 @dataclass(frozen=True)
@@ -59,3 +80,27 @@ REGIONS = (
 )
 REGION = {r.name: r for r in REGIONS}
 SIZE_PROBES = (REGION["probe_4g"], REGION["probe_8g"])
+SIZE_PROBE_OFFSETS = tuple(r.nand_off for r in SIZE_PROBES)
+
+
+def nand_size(probe_status: Sequence[int]) -> int | None:
+    """Chip size: the lowest size-probe offset that failed after all lower ones read ok."""
+    for off, st in zip(SIZE_PROBE_OFFSETS, probe_status):
+        if st == STATUS_FAILED:
+            return off
+        if st != STATUS_OK:
+            return None
+    return None
+
+
+def identify(size: int | None, nfc_id: int) -> Chip | None:
+    """Chip for a probed size, cross-checked with the NAND ID byte when non-zero."""
+    chip = NAND_CHIPS.get(size)
+    by_id = CHIP_BY_ID.get(nfc_id)
+    if chip and nfc_id and by_id is not chip:
+        other = by_id.name if by_id else "an unknown chip"
+        raise ValueError(
+            f"size probes give {chip.name} ({size >> 30} GiB) "
+            f"but NAND ID byte {nfc_id:#04x} gives {other}"
+        )
+    return chip

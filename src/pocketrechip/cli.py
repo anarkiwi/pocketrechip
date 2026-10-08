@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import analyze, backup, probe_script
 from .fel_agent import Agent
+from .progress import setup_logging
 
 UBOOT = Path("/opt/pocketrechip/u-boot-sunxi-with-spl.bin")
 
@@ -49,12 +50,15 @@ def main(argv: list[str] | None = None) -> int:
     pb = sub.add_parser("backup", help="back up the whole NAND over FEL")
     _device_args(pb)
     pb.add_argument("--chunk-ebs", type=int, default=16, help="eraseblocks per session")
-    pb.add_argument("--oob", type=int, help="OOB bytes per page (default from NAND ID)")
-    pb.add_argument("--eraseblocks", type=int, help="default from NAND ID")
+    pb.add_argument(
+        "--oob", type=int, help="OOB bytes per page (default from detected chip)"
+    )
+    pb.add_argument("--eraseblocks", type=int, help="default from detected chip")
     pb.add_argument(
         "--verify", action="store_true", help="re-read and compare ECC data"
     )
     args = p.parse_args(argv)
+    setup_logging()
     if args.cmd == "probe-script":
         sys.stdout.write(probe_script.script(args.seq))
         return 0
