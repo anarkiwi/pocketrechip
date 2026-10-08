@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import subprocess
+from pathlib import PurePosixPath
 
 import pytest
 
@@ -32,7 +33,7 @@ def fake_root(tmp_path):
     (root / "etc/systemd/system/plocate-updatedb.timer").write_text("old")
     for link in WANTS:
         (root / link).parent.mkdir(parents=True, exist_ok=True)
-        (root / link).symlink_to(f"/usr/lib/systemd/system/{link.split('/')[-1]}")
+        (root / link).symlink_to(f"/usr/lib/systemd/system/{PurePosixPath(link).name}")
     return root
 
 
