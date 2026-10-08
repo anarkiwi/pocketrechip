@@ -34,6 +34,7 @@ RUN /build/install-nand-image-builder.sh /build/bin
 FROM debian:trixie AS tools
 RUN apt-get update \
   && apt-get -y install --no-install-recommends sunxi-tools dfu-util u-boot-tools mtd-utils \
+       qemu-system-arm virtiofsd \
        python3 python3-numpy python3-tqdm python3-pip python3-setuptools \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=snib /build/bin/sunxi-nand-image-builder /usr/local/bin/

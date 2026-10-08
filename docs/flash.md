@@ -115,6 +115,78 @@ in the image. `--no-overlay` builds the stock rootfs.
 
 `/tmp` is already tmpfs through Debian's `tmp.mount`. UBIFS compression stays zlib.
 
+## QEMU smoke test
+
+```sh
+docker run --rm -v "$PWD/cache:/cache" pocketrechip pocketrechip qemu-smoke --cache /cache [--no-overlay]
+```
+
+Options: `--flavor`, `--overlay DIR` / `--no-overlay`, `--timeout` (seconds until QEMU
+is killed, default 3600). It needs root, like the UBIFS build.
+
+`qemu-smoke` builds the tree `flash` gives `mkfs.ubifs` (`images.rootfs_tree`: the
+extracted tar with the overlay applied) and boots it with its own `/vmlinuz` and
+`/initrd.img` under full-system `qemu-system-arm` (`virt`, Cortex-A15, one core,
+512 MiB as on the PocketCHIP). No binfmt or host emulator is involved.
+
+- Root: the initrd carries `virtio_mmio` and `ext4` but no driver for any disk QEMU can
+  present on `virt` (`virtio_blk`, `sd_mod`, `nvme`, `mmci`, `ahci`, `usb-storage` are
+  modules outside it), and nothing on the image is regenerated. The kernel builds in
+  `VIRTIO_PCI` and `VIRTIO_FS`, and initramfs-tools' `local` script mounts a `root=` that
+  is not a `/dev` path as given with `rootfstype`, so `virtiofsd` serves the tree
+  (`vhost-user-fs-pci`, tag `rootfs`, memfd-backed shared guest RAM) with
+  `root=rootfs rootfstype=virtiofs rw console=ttyAMA0 panic=-1`.
+- `highmem=off`: the kernel has no `ARM_LPAE`, so every `virt` device must sit below 4 GiB.
+- Changes to the test copy only: fstab's `/` entry becomes `rootfs / virtiofs <its
+  options> 0 0`, so `systemd-remount-fs` applies the overlay's `noatime` as on NAND (the
+  stock fstab has no `/` entry and stays as is); `pocketrechip-smoke.service`
+  (`WantedBy=` and `After=multi-user.target`) waits for
+  `systemctl is-system-running --wait`, sets the console log level to 1 so kernel
+  messages cannot split result lines, prints every probe line prefixed
+  `@pocketrechip-smoke <probe>` to `/dev/console`, and powers off. It does not write to
+  `/dev/ttyAMA0` directly: `serial-getty@ttyAMA0` hangs up descriptors opened there.
+  `-no-reboot` turns the power-off, or a panic, into QEMU exiting.
+- The console streams to `cache/qemu-smoke/<key>/serial.log` (key over the tar sha256,
+  the overlay digest, the unit, the script and the kernel command line) with a progress
+  bar over console lines; `virtiofsd.log` and `result.json` sit beside it.
+
+| Check | With overlay | `--no-overlay` |
+|---|---|---|
+| `swapon --show=NAME,TYPE,SIZE --bytes` | one `/dev/zram*` partition: half of `MemTotal` (`free -k`, same boot) in whole KiB, rounded up to a page by zram, less the header page `mkswap` reserves | no such swap |
+| `findmnt -no OPTIONS /` | has `noatime` | lacks it |
+| `*.journal*` files | none in `/var/log/journal`, some in `/run/log/journal` | otherwise |
+| `systemctl is-enabled plocate-updatedb.timer` | `masked` | not `masked` |
+| `systemctl is-active zram-swap.service` | `active` | not `active` |
+| `sysctl -n vm.page-cluster` | `0` | not `0` |
+| failing units: `ActiveState=failed`, `Result` not `success`, or `NRestarts` > 0 | only expected ones | only expected ones |
+
+Expected failures (`qemu_smoke.EXPECTED_FAILURES`): `ubihealthd.service` runs
+`ubihealthd -d /dev/ubi0` with `Restart=on-failure`; QEMU has no NAND or UBI, so it
+restarts in a loop, too slowly to hit its start limit, which is why `NRestarts` and not
+`ActiveState=failed` catches it. Not a unit failure: under TCG, udev's coldplug can take
+longer than the 90 s device timeout for `dev-ttyAMA0.device`, so
+`serial-getty@ttyAMA0` (generated from `console=ttyAMA0`; the PocketCHIP console is
+`ttyS0`) may log a dependency failure. The exit status is non-zero when the boot does
+not finish or any check fails; `systemd-analyze` and the system state are printed for
+information.
+
+CI's `qemu-smoke` job runs it with the overlay, caching the release tar under its pinned
+sha256 and keeping `cache/qemu-smoke` as an artifact.
+
+### Validated under QEMU
+
+`pocketchip` rootfs of `os-2026.09.23-010738`, `MemTotal` 494788 KiB:
+
+| Check | Overlay | `--no-overlay` |
+|---|---|---|
+| swap | `/dev/zram0` partition, 253329408 bytes | none |
+| `/` options | `rw,noatime` | `rw,relatime` |
+| journal | `/run/log/journal` only | `/var/log/journal` only |
+| `plocate-updatedb.timer` | `masked` | `enabled` |
+| `zram-swap.service` | `active` | `inactive` |
+| `vm.page-cluster` | `0` | `3` |
+| failing units | `ubihealthd.service` (expected) | `ubihealthd.service` (expected) |
+
 ## Restore
 
 `pocketrechip restore --backup DIR [--chunk-ebs 16] [--verify]` runs on the probe U-Boot:

@@ -6,13 +6,14 @@ Current Debian (trixie, armhf) with X and touchscreen on the NextThing PocketCHI
 
 ```sh
 pip install -e '.[dev]'
-docker build -t pocketrechip .       # tools image: sunxi-tools, dfu-util, mkimage, mtd-utils, probe U-Boot
+docker build -t pocketrechip .       # tools image: sunxi-tools, dfu-util, mkimage, mtd-utils, QEMU, probe U-Boot
 pocketrechip probe --out DIR         # FEL: read-only NAND survey, decoded (DIR/dram.bin)
 pocketrechip backup --out DIR        # FEL: full NAND backup (nand.raw, nand.ecc, manifest.json)
 pocketrechip flash --out DIR --backup BACKUP [--flavor pocketchip] [--dry-run]
                                      # FEL: install the Debian trixie release
 pocketrechip restore --out DIR --backup BACKUP [--verify]   # FEL: write a backup back
 pocketrechip analyze DIR/dram.bin    # decode a probe dump (--json for JSON)
+pocketrechip qemu-smoke [--no-overlay]  # boot the flash rootfs under QEMU, check the overlay (root)
 pocketrechip probe-script            # print the probe's U-Boot script
 ```
 
@@ -28,5 +29,5 @@ run them in the image with
 ## Docs
 
 - [docs/probe.md](docs/probe.md): FEL U-Boot agent, safety properties, probe, backup and restore, probe window layout.
-- [docs/flash.md](docs/flash.md): flash and restore procedure, safety properties, rootfs overlay.
+- [docs/flash.md](docs/flash.md): flash and restore procedure, safety properties, rootfs overlay, QEMU smoke test.
 - [docs/sources.md](docs/sources.md): upstream repos, pinned revisions, hardware bring-up facts, known gaps.

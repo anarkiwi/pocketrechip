@@ -36,3 +36,38 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+  qemu-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e .
+      - id: pin
+        run: |
+          python - >> "$GITHUB_OUTPUT" <<'EOF'
+          from pocketrechip import release as R
+          a = R.ROOTFS["pocketchip"]
+          print(f"sha256={a.sha256}")
+          print(f"path={a.path('cache')}")
+          EOF
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pin.outputs.path }}
+          key: rootfs-${{ steps.pin.outputs.sha256 }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: pocketrechip
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: docker run --rm -v "$PWD/cache:/cache" pocketrechip pocketrechip qemu-smoke --cache /cache
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-smoke
+          path: cache/qemu-smoke

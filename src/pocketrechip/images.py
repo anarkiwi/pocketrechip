@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -146,6 +148,23 @@ def extract(tar: Path, root: Path) -> None:
         raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
 
+@contextmanager
+def rootfs_tree(tar: Path, overlay: Path | None, purpose: str) -> Iterator[Path]:
+    """Temporary root of tar with overlay applied, removed on exit (needs root)."""
+    if os.geteuid():
+        raise PermissionError(
+            f"{purpose} needs root to keep file ownership: "
+            "run this step as root in the Docker image"
+        )
+    with tempfile.TemporaryDirectory(prefix="pocketrechip-") as tmp:
+        root = Path(tmp) / "root"
+        root.mkdir()
+        extract(tar, root)
+        if overlay:
+            O.apply(overlay, root)
+        yield root
+
+
 def _ubifs_base(tar_sha256: str, overlay: Path | None, cache: Path) -> Path:
     return Path(cache) / "ubifs" / ubifs_key(tar_sha256, overlay)[:16]
 
@@ -170,18 +189,9 @@ def build_ubifs(
     base = _ubifs_base(tar_sha256, overlay, cache)
     meta = base.with_suffix(".json")
     out = Ubifs(base.with_suffix(".ubifs"), base.with_suffix(".boot.scr"))
-    if os.geteuid():
-        raise PermissionError(
-            "building the UBIFS image needs root to keep file ownership: "
-            "run this step as root in the Docker image"
-        )
     base.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="pocketrechip-") as tmp:
-        root, img = Path(tmp) / "root", Path(tmp) / "rootfs.ubifs"
-        root.mkdir()
-        extract(tar, root)
-        if overlay:
-            O.apply(overlay, root)
+    with rootfs_tree(tar, overlay, "building the UBIFS image") as root:
+        img = root.parent / "rootfs.ubifs"
         scr = root / BOOT_SCR
         if scr.is_symlink() or not scr.is_file():
             raise FileNotFoundError(f"{tar} has no regular /{BOOT_SCR}")
