@@ -68,6 +68,8 @@ pytest -n auto --cov
 ```
 
 - `tools/device-check.sh [user@]HOST`: read-only health report of a booted PocketCHIP over ssh (`SSHPASS` with sshpass for password login).
+- `tools/apt-repo-check.sh [PKG[=MIN]...]`: verify the published apt repo's signature (`keys/pocketrechip-apt.asc`) and package versions.
+- `tools/device-switch-repo.sh [user@]HOST`: move a booted PocketCHIP from the NextThingCo apt repo to ours, upgrade, reboot, report.
 - `scripts/fetch-sources.sh`: clone the upstream repos into `cache/src/`.
 - `scripts/install-nand-image-builder.sh DEST`: build sunxi-tools' `sunxi-nand-image-builder`.
 - `overlay/`: rootfs tuning applied before `mkfs.ubifs`.

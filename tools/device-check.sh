@@ -4,6 +4,7 @@
 set -eu
 target=${1:?usage: device-check.sh [user@]host}
 ssh_cmd="ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+[ -n "${KNOWN_HOSTS:-}" ] && ssh_cmd="$ssh_cmd -o UserKnownHostsFile=$KNOWN_HOSTS"
 [ -n "${SSHPASS:-}" ] && ssh_cmd="sshpass -e $ssh_cmd -o PubkeyAuthentication=no"
 $ssh_cmd "$target" sh -s <<'EOF'
 PATH=$PATH:/usr/sbin:/sbin
