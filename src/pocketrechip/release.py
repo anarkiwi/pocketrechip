@@ -1,4 +1,4 @@
-"""Pinned NextThingCo release assets, downloaded once into the cache and sha256-verified."""
+"""Pinned x-chip release assets (anarkiwi forks), downloaded once and sha256-verified."""
 
 import hashlib
 import logging
@@ -12,9 +12,10 @@ from .progress import progress_bar
 
 log = logging.getLogger(__name__)
 
-UBOOT_TAG = "uboot-2026.09.13-122745"
-OS_TAG = "os-2026.09.23-010738"
-URL = "https://github.com/NextThingCo/{repo}/releases/download/{tag}/{name}"
+UBOOT_TAG = "uboot-2026.10.08-231804"
+OS_TAG = "os-2026.10.09-071038"
+OWNER = "anarkiwi"
+URL = "https://github.com/" + OWNER + "/{repo}/releases/download/{tag}/{name}"
 
 
 @dataclass(frozen=True)
@@ -45,28 +46,28 @@ def _rootfs(flavor: str, sha: str) -> Asset:
 
 
 SPL = _uboot(
-    "sunxi-spl.bin", "879cff4d6345a12091fa8084bab5a002556989b2d10ce1898905dd8666729ba0"
+    "sunxi-spl.bin", "2cdea62d7d3d5fc69f6c1d2a99f0fc0137b361903e3228b2121172aabcfb59cb"
 )
 UBOOT_DTB = _uboot(
-    "u-boot-dtb.bin", "f64e582f7d01cb151cb73f8188ab5d48b5fbc351c9cf43a39570dfc1b48c6aa6"
+    "u-boot-dtb.bin", "2d0266ab7ca80abfad8d9076e1981c2f40e7cbf97f2d8e15bfedf99df1194316"
 )
 UBOOT_FEL = _uboot(
     "u-boot-sunxi-with-spl.bin",
-    "23d2730799a109946753147413153687877e41265981833c4466d034d2279d05",
+    "fece315215b0b90aae40b87a2d11e32387cba6d91f4e0bc32df9bd69300d51a1",
 )
 ROOTFS = {
     a.name.split("-")[0]: a
     for a in (
         _rootfs(
             "headless",
-            "b4dc1e07c7aad56b7e204699d23660ab13dceed46013b88bf5f654f308783d77",
+            "0b842e29c3ef189d6c0bd63643cb05b3915140ebbe918ae970a55d690e33a8a6",
         ),
         _rootfs(
-            "gui", "423edd7f3a07d28a23e38fa401250a70101746ccabc11677cc4b604896896054"
+            "gui", "5593fb152e16753caae542485ea6d70e0b650afe0a82a86bf6ee7b84e42956ec"
         ),
         _rootfs(
             "pocketchip",
-            "1e516cade3085633f61697d69a5d95cb84a501d8b606247987db5837a53e19ef",
+            "85160bdd037826efd8b7b8b0e8643ec7979b358e23fdda6c6a49da9a8bfd82d0",
         ),
     )
 }

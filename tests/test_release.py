@@ -44,8 +44,8 @@ def test_fetch_refuses_bad_sha(tmp_path, monkeypatch):
 
 def test_pinned_table():
     assert R.UBOOT_FEL.url == (
-        "https://github.com/NextThingCo/x-chip-uboot/releases/download/"
-        "uboot-2026.09.13-122745/u-boot-sunxi-with-spl.bin"
+        "https://github.com/anarkiwi/x-chip-uboot/releases/download/"
+        "uboot-2026.10.08-231804/u-boot-sunxi-with-spl.bin"
     )
     assert sorted(R.ROOTFS) == ["gui", "headless", "pocketchip"]
     assert {a.tag for a in R.ROOTFS.values()} == {R.OS_TAG}

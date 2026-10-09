@@ -1,7 +1,7 @@
 # pocketrechip
 
 Reflash a NextThing PocketCHIP with current Debian (trixie, armhf) with X, touchscreen,
-keyboard and Wi-Fi: NextThingCo's [x-chip-os](https://github.com/NextThingCo/x-chip-os)
+keyboard and Wi-Fi: [x-chip-os](https://github.com/anarkiwi/x-chip-os) (our fork of NextThingCo's, built and signed by us)
 image plus this repo's [tuning overlay](overlay/).
 
 ## Requirements

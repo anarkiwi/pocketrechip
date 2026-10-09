@@ -1,8 +1,9 @@
 # Flashing and restoring NAND
 
-`pocketrechip flash` installs the NextThingCo Debian trixie image (`x-chip-os` release
-`os-2026.09.23-010738`, flavors `headless`, `gui`, `pocketchip`) with the `x-chip-uboot`
-release `uboot-2026.09.13-122745` over FEL, streaming the root filesystem through the
+`pocketrechip flash` installs the Debian trixie image built by the
+[anarkiwi/x-chip-os](https://github.com/anarkiwi/x-chip-os) fork (release `os-2026.10.09-071038`,
+flavors `headless`, `gui`, `pocketchip`) with the
+[anarkiwi/x-chip-uboot](https://github.com/anarkiwi/x-chip-uboot) release `uboot-2026.10.08-231804` over FEL, streaming the root filesystem through the
 DFU agent loop of [probe.md](probe.md), so image size is bounded by the UBI volume, not DRAM.
 `pocketrechip restore` writes a `pocketrechip backup` back. `pocketrechip install` runs
 backup and flash for one board in one command.
