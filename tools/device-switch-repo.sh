@@ -26,7 +26,7 @@ chmod 644 /etc/apt/trusted.gpg.d/chip.key.binary.asc
 echo 'deb $repo trixie main' > /etc/apt/sources.list.d/chip.list
 export DEBIAN_FRONTEND=noninteractive
 apt-get -q update
-apt-get -q -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade
+apt-get -q -y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade
 dpkg-query -W -f '\${Package} \${Version}\n' linux-image-chip pocketchip-batt
 EOF
 } | sudo_sh
