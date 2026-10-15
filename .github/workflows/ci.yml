@@ -53,7 +53,7 @@ jobs:
           print(f"sha256={a.sha256}")
           print(f"path={a.path('cache')}")
           EOF
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ${{ steps.pin.outputs.path }}
           key: rootfs-${{ steps.pin.outputs.sha256 }}
