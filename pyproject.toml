@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Flash NextThing PocketCHIPs with current Debian"
 readme = "README.md"
 license = { text = "Apache-2.0" }
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = ["numpy", "tqdm"]
 
 [project.optional-dependencies]
@@ -27,7 +27,7 @@ testpaths = ["tests"]
 source = ["pocketrechip"]
 
 [tool.pylint.main]
-py-version = "3.11"
+py-version = "3.12"
 
 [tool.pylint."messages control"]
 disable = ["too-many-instance-attributes", "too-many-locals", "too-few-public-methods"]
